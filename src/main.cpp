@@ -355,9 +355,10 @@ int main(int argc, char** argv) {
             if (!pipe) return;
 
             char buf[512];
-            std::regex cargo_rx(R"(\[(\d+)/(\d+)\])");
+            std::regex cargo_rx(R"((\d+)/(\d+))"); // More permissive [1/100]
             std::regex webpack_rx(R"((\d+)%)");
             std::regex make_rx(R"(\[\s*(\d+)%\])");
+            std::regex ready_rx(R"(ready in|Ready in|Network:|Finished|Success|Done|listening on)");
             
             BuildJob w_job = {project_name, tool_name, "Running", 0.0f, 0};
             
@@ -389,6 +390,9 @@ int main(int argc, char** argv) {
                     } else if (std::regex_search(line, match, make_rx)) {
                         w_job.progress = std::stof(match[1].str()) / 100.0f;
                         w_job.status = "Building";
+                    } else if (std::regex_search(line, match, ready_rx)) {
+                        w_job.progress = 1.0f;
+                        w_job.status = "Ready/Watching";
                     }
                 } catch (...) {}
 
@@ -620,7 +624,13 @@ int main(int argc, char** argv) {
 
         std::string proj = "custom";
         if (!dir_input_str.empty()) {
-            proj = fs::path(dir_input_str).filename().string();
+            fs::path p(dir_input_str);
+            // Handle trailing slash by using parent if filename is empty
+            if (p.has_filename()) {
+                proj = p.filename().string();
+            } else if (p.has_parent_path()) {
+                proj = p.parent_path().filename().string();
+            }
         }
 
         std::string final_cmd = cmd_input_str + " 2>&1";
