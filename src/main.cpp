@@ -232,6 +232,23 @@ Element render_progress_bar(float progress, int width = 30) {
 // ─────────────────────────────────────────────
 
 int main(int argc, char** argv) {
+    if (argc > 1) {
+        std::string arg = argv[1];
+        if (arg == "--help" || arg == "-h" || arg == "help") {
+            printf("BuildMon - Terminal Build Monitor\n\n");
+            printf("Usage:\n");
+            printf("  buildmon                  Start passive monitoring (Scanner Mode)\n");
+            printf("  buildmon run <cmd>        Run a build command and parse exact progress (Wrapper Mode)\n");
+            printf("  buildmon --help, -h       Show this help message\n");
+            printf("  buildmon --version, -v    Show version information\n");
+            return 0;
+        }
+        if (arg == "--version" || arg == "-v" || arg == "version") {
+            printf("BuildMon v1.0\n");
+            return 0;
+        }
+    }
+
     bool wrapper_mode = (argc > 1 && std::string(argv[1]) == "run");
     std::string wrapper_cmd = "";
     std::string wrapper_tool = "";
