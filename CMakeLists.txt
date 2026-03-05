@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(buildmon)
+project(buildm-on)
 
 set(CMAKE_CXX_STANDARD 17)
 
@@ -11,9 +11,9 @@ FetchContent_Declare(ftxui
 )
 FetchContent_MakeAvailable(ftxui)
 
-add_executable(buildmon src/main.cpp)
+add_executable(buildm-on src/main.cpp)
 
-target_link_libraries(buildmon
+target_link_libraries(buildm-on
   PRIVATE ftxui::screen
   PRIVATE ftxui::dom
   PRIVATE ftxui::component
@@ -21,7 +21,7 @@ target_link_libraries(buildmon
 
 # Statically link C++ runtime on Windows so it doesn't need MinGW DLLs in PATH
 if(WIN32)
-  set_target_properties(buildmon PROPERTIES LINK_FLAGS "-static-libgcc -static-libstdc++ -static -pthread")
+  set_target_properties(buildm-on PROPERTIES LINK_FLAGS "-static-libgcc -static-libstdc++ -static -pthread")
 endif()
 
-install(TARGETS buildmon RUNTIME DESTINATION bin)
+install(TARGETS buildm-on RUNTIME DESTINATION bin)

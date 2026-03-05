@@ -41,7 +41,7 @@ Config load_config() {
 #ifndef _WIN32
     const char* home = getenv("HOME");
     if (!home) return cfg;
-    std::ifstream f(std::string(home) + "/.buildmon.toml");
+    std::ifstream f(std::string(home) + "/.buildm-on.toml");
     std::string line;
     while (std::getline(f, line)) {
         if (line.find("theme") != std::string::npos && line.find("=") != std::string::npos) {
@@ -77,7 +77,7 @@ void send_ipc_update(const BuildJob& job) {
     if (sock < 0) return;
     struct sockaddr_un addr;
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, "/tmp/buildmon.sock", sizeof(addr.sun_path) - 1);
+    strncpy(addr.sun_path, "/tmp/buildm-on.sock", sizeof(addr.sun_path) - 1);
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
         std::string msg = job.project + "|" + job.tool + "|" + job.status + "|" + std::to_string(job.progress);
         write(sock, msg.c_str(), msg.size());
@@ -305,16 +305,16 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         std::string arg = argv[1];
         if (arg == "--help" || arg == "-h" || arg == "help") {
-            printf("BuildMon - Terminal Build Monitor\n\n");
+            printf("Buildm-on - Terminal Build Monitor\n\n");
             printf("Usage:\n");
-            printf("  buildmon                  Start passive monitoring (Scanner Mode)\n");
-            printf("  buildmon run <cmd>        Run a build command and parse exact progress (Wrapper Mode)\n");
-            printf("  buildmon --help, -h       Show this help message\n");
-            printf("  buildmon --version, -v    Show version information\n");
+            printf("  buildm-on                  Start passive monitoring (Scanner Mode)\n");
+            printf("  buildm-on run <cmd>        Run a build command and parse exact progress (Wrapper Mode)\n");
+            printf("  buildm-on --help, -h       Show this help message\n");
+            printf("  buildm-on --version, -v    Show version information\n");
             return 0;
         }
         if (arg == "--version" || arg == "-v" || arg == "version") {
-            printf("BuildMon v1.0\n");
+            printf("Buildm-on v1.0\n");
             return 0;
         }
     }
@@ -330,7 +330,7 @@ int main(int argc, char** argv) {
         }
         wrapper_cmd += " 2>&1";
     } else if (wrapper_mode) {
-        printf("Usage: buildmon run <command>\n");
+        printf("Usage: buildm-on run <command>\n");
         return 1;
     }
 
@@ -511,8 +511,8 @@ int main(int argc, char** argv) {
             if (server_fd < 0) return;
             struct sockaddr_un addr;
             addr.sun_family = AF_UNIX;
-            strncpy(addr.sun_path, "/tmp/buildmon.sock", sizeof(addr.sun_path) - 1);
-            unlink("/tmp/buildmon.sock");
+            strncpy(addr.sun_path, "/tmp/buildm-on.sock", sizeof(addr.sun_path) - 1);
+            unlink("/tmp/buildm-on.sock");
             if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) return;
             listen(server_fd, 5);
             
@@ -548,7 +548,7 @@ int main(int argc, char** argv) {
                 screen.PostEvent(Event::Custom);
             }
             close(server_fd);
-            unlink("/tmp/buildmon.sock");
+            unlink("/tmp/buildm-on.sock");
         });
         ipc_server.detach();
 
@@ -770,7 +770,7 @@ int main(int argc, char** argv) {
         return vbox({
             // Header
             hbox({
-                text(" BuildMon ") | bold | color(primary_color),
+                text(" Buildm-on ") | bold | color(primary_color),
                 text(wrapper_mode ? "(Wrapper Mode)" : "v1.0") | color(Color::GrayDark),
                 filler(),
                 text("Active Builds: ") | color(Color::GrayDark),

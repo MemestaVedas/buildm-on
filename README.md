@@ -1,16 +1,16 @@
-# BuildMon 🚀
+# Buildm-on 🚀
 
-A real-time terminal build monitor in C++ with FTXUI. BuildMon detects and tracks builds happening on your system, whether they are initiated via compilers like `gcc`, package managers like `npm`, or build tools like `cargo` and `make`.
+A real-time terminal build monitor in C++ with FTXUI. Buildm-on detects and tracks builds happening on your system, whether they are initiated via compilers like `gcc`, package managers like `npm`, or build tools like `cargo` and `make`.
 
-![BuildMon Demo Screenshot](https://raw.githubusercontent.com/ArthurSonzogni/FTXUI/master/doc/FTXUI_v5.0.gif) *(Example FTXUI Output)*
+![Buildm-on Demo Screenshot](https://raw.githubusercontent.com/ArthurSonzogni/FTXUI/master/doc/FTXUI_v5.0.gif) *(Example FTXUI Output)*
 
 ## Features ✨
 
 * **Zero-Setup Process Scanning**: Reads `/proc` to instantly discover and display active builds running anywhere on the OS.
-* **Wrapper Mode**: Prefix your build command with `buildmon run <cmd>` to capture real `stdout` progress percentages via regex parsing.
+* **Wrapper Mode**: Prefix your build command with `buildm-on run <cmd>` to capture real `stdout` progress percentages via regex parsing.
 * **Build History**: Tracks the last 5 completed or failed builds.
 * **Desktop Notifications**: Uses `notify-send` on Linux to alert you when builds finish.
-* **Themes**: Supports color themes via `~/.buildmon.toml` config file.
+* **Themes**: Supports color themes via `~/.buildm-on.toml` config file.
 * **Live System Stats**: Displays constant uptime and overall CPU usage.
 
 ## Requirements 🐧
@@ -30,7 +30,7 @@ This application natively leverages specific Linux APIs:
 If you are on Windows, ensure you have WSL installed and are running these commands inside a Linux terminal (like Ubuntu on WSL).
 
 1. **Clone or Download the Repository**:
-   Navigate to the directory where you saved `buildmon` (`d:\Kushal\projects\build-on\buildmon`).
+   Navigate to the directory where you saved `buildm-on` (`d:\Kushal\projects\build-on\buildm-on`).
 
 2. **Configure the Project**:
    ```bash
@@ -45,7 +45,7 @@ If you are on Windows, ensure you have WSL installed and are running these comma
    ```
 
 4. **Install Globally (Optional but Recommended)**:
-   Add the compiled `buildmon` binary to your system PATH so you can run it from any terminal.
+   Add the compiled `buildm-on` binary to your system PATH so you can run it from any terminal.
 
    **Windows (PowerShell)**:
    We included an install script for you. Run this from the root of the project:
@@ -63,22 +63,22 @@ If you are on Windows, ensure you have WSL installed and are running these comma
 ## Usage 🏃
 
 ### Strategy 1: Passive Monitoring (Scanner Mode)
-Simply launch `buildmon`. It will automatically scan your system every second for active build tools.
+Simply launch `buildm-on`. It will automatically scan your system every second for active build tools.
 ```bash
-./build/buildmon
+buildm-on
 ```
-While BuildMon is running, open another terminal window and start a build (like `npm run build` or `cargo build`). BuildMon will instantly detect it.
+While Buildm-on is running, open another terminal window and start a build (like `npm run build` or `cargo build`). Buildm-on will instantly detect it.
 
 ### Strategy 2: Active Monitoring (Wrapper Mode)
-If you want accurate progress percentages instead of heuristics, run your build command through BuildMon:
+If you want accurate progress percentages instead of heuristics, run your build command through Buildm-on:
 ```bash
-./build/buildmon run cargo build
+buildm-on run cargo build
 ```
-BuildMon will spawn the command, intercept the output to parse progress bars, and display the real-time exact progress.
+Buildm-on will spawn the command, intercept the output to parse progress bars, and display the real-time exact progress.
 
 ## Configuration (Optional) ⚙️
 
-Create a file named `.buildmon.toml` in your home directory (`~/.buildmon.toml`) to customize BuildMon:
+Create a file named `.buildm-on.toml` in your home directory (`~/.buildm-on.toml`) to customize Buildm-on:
 
 ```toml
 theme = "ocean"        # Options: default, ocean, matrix
