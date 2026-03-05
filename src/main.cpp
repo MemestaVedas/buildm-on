@@ -228,6 +228,76 @@ Element render_progress_bar(float progress, int width = 30) {
 }
 
 // ─────────────────────────────────────────────
+// Autocomplete Helpers
+// ─────────────────────────────────────────────
+
+void autocomplete_path(std::string& input, int& cursor_pos) {
+    fs::path p(input);
+    fs::path dir = p.parent_path().empty() ? "." : p.parent_path();
+    std::string prefix = p.filename().string();
+    if (input.empty() || input.back() == '/' || input.back() == '\\') {
+        dir = input.empty() ? "." : input;
+        prefix = "";
+    }
+    
+    std::error_code ec;
+    std::string best_match = "";
+    if (fs::exists(dir, ec) && fs::is_directory(dir, ec)) {
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            std::string name = entry.path().filename().string();
+            std::string name_lower = name;
+            std::string prefix_lower = prefix;
+            std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+            std::transform(prefix_lower.begin(), prefix_lower.end(), prefix_lower.begin(), ::tolower);
+            
+            if (name_lower.rfind(prefix_lower, 0) == 0) {
+                best_match = entry.path().string();
+                if (fs::is_directory(entry.path(), ec)) {
+                    best_match += "/";
+                }
+                break;
+            }
+        }
+    }
+    
+    if (!best_match.empty()) {
+#ifdef _WIN32
+        std::replace(best_match.begin(), best_match.end(), '\\', '/');
+#endif
+        if (best_match.substr(0, 2) == "./" && input.substr(0, 2) != "./") {
+            best_match = best_match.substr(2);
+        }
+        input = best_match;
+        cursor_pos = (int)input.size();
+    }
+}
+
+void autocomplete_cmd(std::string& input, int& cursor_pos) {
+    if (input.find('/') != std::string::npos || input.find('\\') != std::string::npos) {
+        autocomplete_path(input, cursor_pos);
+        return;
+    }
+    
+    std::vector<std::string> known_cmds = {"cargo", "npm", "make", "gcc", "g++", "clang", "cmake", "node", "python3", "go", "buildmon"};
+    std::string best = "";
+    std::string input_lower = input;
+    std::transform(input_lower.begin(), input_lower.end(), input_lower.begin(), ::tolower);
+
+    for (const auto& c : known_cmds) {
+        if (c.rfind(input_lower, 0) == 0) {
+            best = c;
+            break;
+        }
+    }
+    if (!best.empty()) {
+        input = best + " ";
+        cursor_pos = (int)input.size();
+        return;
+    }
+    autocomplete_path(input, cursor_pos);
+}
+
+// ─────────────────────────────────────────────
 // Main — TUI Dashboard
 // ─────────────────────────────────────────────
 
@@ -477,7 +547,37 @@ int main(int argc, char** argv) {
         quit();
     });
 
-    auto layout = Container::Vertical({ quit_btn });
+    std::string dir_input_str = "";
+    int dir_cursor = 0;
+    InputOption dir_opt = InputOption::Default();
+    dir_opt.cursor_position = &dir_cursor;
+    auto dir_input = Input(&dir_input_str, "e.g. ./target", dir_opt);
+    auto dir_input_caught = CatchEvent(dir_input, [&](Event e) {
+        if (e == Event::Tab) {
+            autocomplete_path(dir_input_str, dir_cursor);
+            return true;
+        }
+        return false;
+    });
+
+    std::string cmd_input_str = "";
+    int cmd_cursor = 0;
+    InputOption cmd_opt = InputOption::Default();
+    cmd_opt.cursor_position = &cmd_cursor;
+    auto cmd_input = Input(&cmd_input_str, "e.g. npm run build", cmd_opt);
+    auto cmd_input_caught = CatchEvent(cmd_input, [&](Event e) {
+        if (e == Event::Tab) {
+            autocomplete_cmd(cmd_input_str, cmd_cursor);
+            return true;
+        }
+        return false;
+    });
+
+    auto layout = Container::Vertical({
+        dir_input_caught,
+        cmd_input_caught,
+        quit_btn
+    });
 
     auto renderer = Renderer(layout, [&]() -> Element {
         std::lock_guard<std::mutex> lock(data_mutex);
@@ -567,6 +667,18 @@ int main(int argc, char** argv) {
                 text(std::to_string(jobs.size())) | bold | color(accent_color),
                 text("  "),
             }) | bgcolor(bg_color),
+
+            separator(),
+
+            // Interactive Inputs
+            hbox({
+                text(" Directory: ") | color(primary_color),
+                dir_input_caught->Render() | flex,
+            }),
+            hbox({
+                text(" Command:   ") | color(primary_color),
+                cmd_input_caught->Render() | flex,
+            }),
 
             separator(),
 
