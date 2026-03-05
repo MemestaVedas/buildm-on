@@ -28,6 +28,38 @@ namespace fs = std::filesystem;
 // Data Types
 // ─────────────────────────────────────────────
 
+struct Config {
+    std::string theme = "default";
+    bool notifications = true;
+};
+
+Config load_config() {
+    Config cfg;
+#ifndef _WIN32
+    const char* home = getenv("HOME");
+    if (!home) return cfg;
+    std::ifstream f(std::string(home) + "/.buildmon.toml");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.find("theme") != std::string::npos && line.find("=") != std::string::npos) {
+            if (line.find("ocean") != std::string::npos) cfg.theme = "ocean";
+            else if (line.find("matrix") != std::string::npos) cfg.theme = "matrix";
+        }
+        if (line.find("notifications") != std::string::npos && line.find("false") != std::string::npos) {
+            cfg.notifications = false;
+        }
+    }
+#endif
+    return cfg;
+}
+
+void send_notification(const std::string& summary, const std::string& body) {
+#ifndef _WIN32
+    std::string cmd = "notify-send \"" + summary + "\" \"" + body + "\" &";
+    system(cmd.c_str());
+#endif
+}
+
 struct BuildJob {
     std::string project;   // folder name of the process
     std::string tool;      // cargo, npm, gcc, etc.
@@ -198,8 +230,10 @@ int main(int argc, char** argv) {
     }
 
     auto screen = ScreenInteractive::TerminalOutput();
+    Config cfg = load_config();
 
     std::vector<BuildJob> jobs;
+    std::vector<BuildJob> history_jobs;
     float cpu_usage = 0.0f;
     std::mutex data_mutex;
     int uptime_seconds = 0;
@@ -249,13 +283,17 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
             _pclose(pipe);
 #else
-            pclose(pipe);
+            int exit_code = pclose(pipe);
+            if (exit_code != 0) w_job.status = "Failed";
+            else w_job.status = "Finished";
 #endif
             {
                 std::lock_guard<std::mutex> lock(data_mutex);
                 if (!jobs.empty()) {
-                    jobs[0].status = "Finished";
+                    jobs[0].status = w_job.status;
                     jobs[0].progress = 1.0f;
+                    history_jobs.insert(history_jobs.begin(), jobs[0]);
+                    if (cfg.notifications) send_notification("Wrapper Build", "Status: " + jobs[0].status);
                 }
                 is_running = false;
             }
@@ -271,6 +309,25 @@ int main(int argc, char** argv) {
                 {
                     std::lock_guard<std::mutex> lock(data_mutex);
                     if (!is_running) break;
+                    
+                    for (const auto& old_job : jobs) {
+                        bool found = false;
+                        for (const auto& new_job : new_jobs) {
+                            if (old_job.project == new_job.project && old_job.pid == new_job.pid) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found && old_job.status != "Finished") {
+                            BuildJob fin = old_job;
+                            fin.status = "Finished";
+                            fin.progress = 1.0f;
+                            history_jobs.insert(history_jobs.begin(), fin);
+                            if (history_jobs.size() > 5) history_jobs.pop_back();
+                            if (cfg.notifications) send_notification("Build Finished", "Project: " + fin.project);
+                        }
+                    }
+
                     jobs = new_jobs;
                     cpu_usage = new_cpu;
                 }
@@ -309,6 +366,18 @@ int main(int argc, char** argv) {
     auto renderer = Renderer(layout, [&]() -> Element {
         std::lock_guard<std::mutex> lock(data_mutex);
 
+        Color primary_color = Color::Cyan;
+        Color accent_color = Color::Green;
+        Color bg_color = Color::Black;
+        
+        if (cfg.theme == "ocean") {
+            primary_color = Color::BlueLight;
+            accent_color = Color::Cyan;
+        } else if (cfg.theme == "matrix") {
+            primary_color = Color::Green;
+            accent_color = Color::GreenLight;
+        }
+
         // Format uptime
         int h = uptime_seconds / 3600;
         int m = (uptime_seconds % 3600) / 60;
@@ -330,19 +399,19 @@ int main(int argc, char** argv) {
                 job_elements.push_back(separator());
                 job_elements.push_back(
                     hbox({
-                        text("  Project : ") | color(Color::Cyan),
+                        text("  Project : ") | color(primary_color),
                         text(job.project) | bold
                     })
                 );
                 job_elements.push_back(
                     hbox({
-                        text("  Tool    : ") | color(Color::Cyan),
+                        text("  Tool    : ") | color(primary_color),
                         text(job.tool)
                     })
                 );
                 job_elements.push_back(
                     hbox({
-                        text("  Status  : ") | color(Color::Cyan),
+                        text("  Status  : ") | color(primary_color),
                         text(job.status) | color(Color::Yellow)
                     })
                 );
@@ -353,6 +422,20 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Render history
+        Elements hist_elements;
+        if (!history_jobs.empty()) {
+            hist_elements.push_back(separator());
+            hist_elements.push_back(text("  Recent History:") | color(Color::GrayDark));
+            for (const auto& hj : history_jobs) {
+                Color s_color = (hj.status == "Failed") ? Color::Red : Color::Green;
+                hist_elements.push_back(
+                    hbox({ text("  - " + hj.project + " [" + hj.tool + "] "), text(hj.status) | color(s_color) })
+                );
+            }
+            hist_elements.push_back(text(""));
+        }
+
         // Footer stats
         Color cpu_color = cpu_usage > 80.0f ? Color::Red
                         : cpu_usage > 50.0f ? Color::Yellow
@@ -361,18 +444,19 @@ int main(int argc, char** argv) {
         return vbox({
             // Header
             hbox({
-                text(" BuildMon ") | bold | color(Color::Cyan),
+                text(" BuildMon ") | bold | color(primary_color),
                 text(wrapper_mode ? "(Wrapper Mode)" : "v1.0") | color(Color::GrayDark),
                 filler(),
                 text("Active Builds: ") | color(Color::GrayDark),
-                text(std::to_string(jobs.size())) | bold | color(Color::Green),
+                text(std::to_string(jobs.size())) | bold | color(accent_color),
                 text("  "),
-            }) | bgcolor(Color::Black),
+            }) | bgcolor(bg_color),
 
             separator(),
 
             // Build jobs
             vbox(job_elements),
+            vbox(hist_elements),
 
             separator(),
 
