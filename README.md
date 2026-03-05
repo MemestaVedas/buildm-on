@@ -44,6 +44,22 @@ If you are on Windows, ensure you have WSL installed and are running these comma
    cmake --build .
    ```
 
+4. **Install Globally (Optional but Recommended)**:
+   Add the compiled `buildmon` binary to your system PATH so you can run it from any terminal.
+
+   **Windows (PowerShell)**:
+   We included an install script for you. Run this from the root of the project:
+   ```powershell
+   .\install.ps1
+   ```
+   *(Restart your terminal afterward to apply the new PATH)*
+
+   **Linux / WSL / macOS**:
+   Use CMake's built-in install target:
+   ```bash
+   sudo cmake --install .
+   ```
+
 ## Usage 🏃
 
 ### Strategy 1: Passive Monitoring (Scanner Mode)

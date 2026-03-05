@@ -18,3 +18,5 @@ target_link_libraries(buildmon
   PRIVATE ftxui::dom
   PRIVATE ftxui::component
 )
+
+install(TARGETS buildmon RUNTIME DESTINATION bin)
