@@ -19,6 +19,9 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/inotify.h>
 #endif
 
 using namespace ftxui;
@@ -67,6 +70,21 @@ struct BuildJob {
     float progress;        // 0.0 to 1.0
     int pid;
 };
+
+void send_ipc_update(const BuildJob& job) {
+#ifndef _WIN32
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) return;
+    struct sockaddr_un addr;
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/buildmon.sock", sizeof(addr.sun_path) - 1);
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+        std::string msg = job.project + "|" + job.tool + "|" + job.status + "|" + std::to_string(job.progress);
+        write(sock, msg.c_str(), msg.size());
+    }
+    close(sock);
+#endif
+}
 
 // ─────────────────────────────────────────────
 // Process Scanner
@@ -278,6 +296,7 @@ int main(int argc, char** argv) {
                     jobs = {w_job};
                     cpu_usage = get_cpu_usage();
                 }
+                send_ipc_update(w_job);
                 screen.PostEvent(Event::Custom);
             }
 #ifdef _WIN32
@@ -337,6 +356,86 @@ int main(int argc, char** argv) {
             }
         });
         scanner.detach();
+
+#ifndef _WIN32
+        std::thread ipc_server([&] {
+            int server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (server_fd < 0) return;
+            struct sockaddr_un addr;
+            addr.sun_family = AF_UNIX;
+            strncpy(addr.sun_path, "/tmp/buildmon.sock", sizeof(addr.sun_path) - 1);
+            unlink("/tmp/buildmon.sock");
+            if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) return;
+            listen(server_fd, 5);
+            
+            while (is_running) {
+                // Use a timeout or poll in real app to allow clean exit, blocking accept for simplicity here
+                int client = accept(server_fd, NULL, NULL);
+                if (client < 0) continue;
+                char buf[512];
+                int n = read(client, buf, sizeof(buf) - 1);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    std::string payload(buf);
+                    auto pos1 = payload.find('|');
+                    auto pos2 = payload.find('|', pos1 + 1);
+                    auto pos3 = payload.find('|', pos2 + 1);
+                    if (pos1 != std::string::npos && pos2 != std::string::npos && pos3 != std::string::npos) {
+                        std::string proj = payload.substr(0, pos1);
+                        std::string t = payload.substr(pos1 + 1, pos2 - pos1 - 1);
+                        std::string stat = payload.substr(pos2 + 1, pos3 - pos2 - 1);
+                        float prog = std::stof(payload.substr(pos3 + 1));
+                        
+                        std::lock_guard<std::mutex> lock(data_mutex);
+                        bool found = false;
+                        for (auto& j : jobs) {
+                            if (j.project == proj) {
+                                j.progress = prog; j.status = stat; found = true; break;
+                            }
+                        }
+                        if (!found) jobs.push_back({proj, t, stat, prog, -1});
+                    }
+                }
+                close(client);
+                screen.PostEvent(Event::Custom);
+            }
+            close(server_fd);
+            unlink("/tmp/buildmon.sock");
+        });
+        ipc_server.detach();
+
+        std::thread inotify_thread([&] {
+            int fd = inotify_init();
+            if (fd < 0) return;
+            int wd = inotify_add_watch(fd, "./target", IN_CREATE | IN_MODIFY);
+            if (wd < 0) wd = inotify_add_watch(fd, "./build", IN_CREATE | IN_MODIFY);
+            if (wd < 0) { close(fd); return; }
+
+            char buf[4096];
+            while (is_running) {
+                // In a real app we would use non-blocking read or poll to check is_running
+                int length = read(fd, buf, sizeof(buf));
+                if (length > 0) {
+                    std::lock_guard<std::mutex> lock(data_mutex);
+                    bool found = false;
+                    for (auto& job : jobs) {
+                        if (job.project == "local_dir") {
+                            job.progress = std::min(job.progress + 0.05f, 0.99f);
+                            job.status = "Building artifacts";
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        jobs.push_back({"local_dir", "inotify", "Building artifacts", 0.05f, -1});
+                    }
+                }
+                screen.PostEvent(Event::Custom);
+            }
+            close(fd);
+        });
+        inotify_thread.detach();
+#endif
     }
 
     std::thread uptime_tracker([&] {
