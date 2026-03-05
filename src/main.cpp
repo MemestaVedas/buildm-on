@@ -344,12 +344,13 @@ int main(int argc, char** argv) {
     int uptime_seconds = 0;
     bool is_running = true;
 
-    if (wrapper_mode) {
-        std::thread runner([&] {
+    // Define the execution logic as a lambda so it can be called from multiple places
+    auto run_command_logic = [&](std::string cmd_to_run, std::string tool_name, std::string project_name) {
+        std::thread runner([&, cmd_to_run, tool_name, project_name] {
 #ifdef _WIN32
-            FILE* pipe = _popen(wrapper_cmd.c_str(), "r");
+            FILE* pipe = _popen(cmd_to_run.c_str(), "r");
 #else
-            FILE* pipe = popen(wrapper_cmd.c_str(), "r");
+            FILE* pipe = popen(cmd_to_run.c_str(), "r");
 #endif
             if (!pipe) return;
 
@@ -358,7 +359,7 @@ int main(int argc, char** argv) {
             std::regex webpack_rx(R"((\d+)%)");
             std::regex make_rx(R"(\[\s*(\d+)%\])");
             
-            BuildJob w_job = {"wrapped", wrapper_tool, "Running", 0.0f, 0};
+            BuildJob w_job = {project_name, tool_name, "Running", 0.0f, 0};
 
             while (fgets(buf, sizeof(buf), pipe)) {
                 std::string line(buf);
@@ -380,7 +381,17 @@ int main(int argc, char** argv) {
 
                 {
                     std::lock_guard<std::mutex> lock(data_mutex);
-                    jobs = {w_job};
+                    // Update or add this job to the list
+                    bool found = false;
+                    for (auto& j : jobs) {
+                        if (j.project == project_name && j.tool == tool_name) {
+                            j.progress = w_job.progress;
+                            j.status = w_job.status;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) jobs.push_back(w_job);
                     cpu_usage = get_cpu_usage();
                 }
                 send_ipc_update(w_job);
@@ -395,17 +406,26 @@ int main(int argc, char** argv) {
 #endif
             {
                 std::lock_guard<std::mutex> lock(data_mutex);
-                if (!jobs.empty()) {
-                    jobs[0].status = w_job.status;
-                    jobs[0].progress = 1.0f;
-                    history_jobs.insert(history_jobs.begin(), jobs[0]);
-                    if (cfg.notifications) send_notification("Wrapper Build", "Status: " + jobs[0].status);
+                for (auto it = jobs.begin(); it != jobs.end(); ) {
+                    if (it->project == project_name && it->tool == tool_name) {
+                        it->status = w_job.status;
+                        it->progress = 1.0f;
+                        history_jobs.insert(history_jobs.begin(), *it);
+                        if (history_jobs.size() > 5) history_jobs.pop_back();
+                        it = jobs.erase(it);
+                    } else {
+                        ++it;
+                    }
                 }
-                is_running = false;
+                if (cfg.notifications) send_notification(project_name + " Build", "Status: " + w_job.status);
             }
             screen.PostEvent(Event::Custom);
         });
         runner.detach();
+    };
+
+    if (wrapper_mode) {
+        run_command_logic(wrapper_cmd, wrapper_tool, "wrapped");
     } else {
         std::thread scanner([&] {
             while (true) {
@@ -549,25 +569,55 @@ int main(int argc, char** argv) {
 
     std::string dir_input_str = "";
     int dir_cursor = 0;
+
+    std::string cmd_input_str = "";
+    int cmd_cursor = 0;
+
+    auto run_action = [&] {
+        if (cmd_input_str.empty()) return;
+
+        std::string tool = "build";
+        auto pos = cmd_input_str.find(' ');
+        if (pos != std::string::npos) tool = cmd_input_str.substr(0, pos);
+        else tool = cmd_input_str;
+
+        std::string proj = "custom";
+        if (!dir_input_str.empty()) {
+            proj = fs::path(dir_input_str).filename().string();
+        }
+
+        std::string final_cmd = cmd_input_str + " 2>&1";
+        if (!dir_input_str.empty()) {
+            final_cmd = "cd " + dir_input_str + " && " + final_cmd;
+        }
+
+        run_command_logic(final_cmd, tool, proj);
+        cmd_input_str = ""; // Clear after run
+    };
+
+    auto run_btn = Button(" [ RUN ] ", run_action, ButtonOption::Animated(Color::Green, Color::Black, Color::GreenLight, Color::White));
+
     InputOption dir_opt = InputOption::Default();
     dir_opt.cursor_position = &dir_cursor;
+    dir_opt.on_enter = run_action;
     auto dir_input = Input(&dir_input_str, "e.g. ./target", dir_opt);
     auto dir_input_caught = CatchEvent(dir_input, [&](Event e) {
         if (e == Event::Tab) {
             autocomplete_path(dir_input_str, dir_cursor);
+            screen.PostEvent(Event::Custom);
             return true;
         }
         return false;
     });
 
-    std::string cmd_input_str = "";
-    int cmd_cursor = 0;
     InputOption cmd_opt = InputOption::Default();
     cmd_opt.cursor_position = &cmd_cursor;
+    cmd_opt.on_enter = run_action;
     auto cmd_input = Input(&cmd_input_str, "e.g. npm run build", cmd_opt);
     auto cmd_input_caught = CatchEvent(cmd_input, [&](Event e) {
         if (e == Event::Tab) {
             autocomplete_cmd(cmd_input_str, cmd_cursor);
+            screen.PostEvent(Event::Custom);
             return true;
         }
         return false;
@@ -576,7 +626,10 @@ int main(int argc, char** argv) {
     auto layout = Container::Vertical({
         dir_input_caught,
         cmd_input_caught,
-        quit_btn
+        Container::Horizontal({
+            run_btn,
+            quit_btn
+        })
     });
 
     auto renderer = Renderer(layout, [&]() -> Element {
@@ -671,13 +724,21 @@ int main(int argc, char** argv) {
             separator(),
 
             // Interactive Inputs
-            hbox({
-                text(" Directory: ") | color(primary_color),
-                dir_input_caught->Render() | flex,
-            }),
-            hbox({
-                text(" Command:   ") | color(primary_color),
-                cmd_input_caught->Render() | flex,
+            vbox({
+                hbox({
+                    text(" Directory: ") | color(primary_color) | size(WIDTH, EQUAL, 12),
+                    dir_input_caught->Render() | flex | borderLight | color(accent_color),
+                }),
+                hbox({
+                    text(" Command:   ") | color(primary_color) | size(WIDTH, EQUAL, 12),
+                    cmd_input_caught->Render() | flex | borderLight | color(accent_color),
+                }),
+                hbox({
+                    filler(),
+                    run_btn->Render(),
+                    text("  "),
+                    quit_btn->Render(),
+                }),
             }),
 
             separator(),
@@ -695,10 +756,10 @@ int main(int argc, char** argv) {
                 text("   Uptime : ") | color(Color::GrayDark),
                 text(uptime_str),
                 filler(),
-                quit_btn->Render(),
+                text(" [ Enter ] to Run   [ Tab ] to Complete   [ q ] to Quit "),
                 text(" "),
             }),
-        }) | border;
+        }) | border | color(primary_color);
     });
 
     // Allow 'q' to quit
