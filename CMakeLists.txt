@@ -19,4 +19,9 @@ target_link_libraries(buildmon
   PRIVATE ftxui::component
 )
 
+# Statically link C++ runtime on Windows so it doesn't need MinGW DLLs in PATH
+if(WIN32)
+  set_target_properties(buildmon PROPERTIES LINK_FLAGS "-static-libgcc -static-libstdc++ -static -pthread")
+endif()
+
 install(TARGETS buildmon RUNTIME DESTINATION bin)
