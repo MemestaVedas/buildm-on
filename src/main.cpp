@@ -13,6 +13,7 @@
 #include <chrono>
 #include <map>
 #include <algorithm>
+#include <regex>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -180,35 +181,128 @@ Element render_progress_bar(float progress, int width = 30) {
 // Main — TUI Dashboard
 // ─────────────────────────────────────────────
 
-int main() {
+int main(int argc, char** argv) {
+    bool wrapper_mode = (argc > 1 && std::string(argv[1]) == "run");
+    std::string wrapper_cmd = "";
+    std::string wrapper_tool = "";
+    if (wrapper_mode && argc > 2) {
+        wrapper_tool = argv[2];
+        for (int i = 2; i < argc; i++) {
+            wrapper_cmd += argv[i];
+            if (i < argc - 1) wrapper_cmd += " ";
+        }
+        wrapper_cmd += " 2>&1";
+    } else if (wrapper_mode) {
+        printf("Usage: buildmon run <command>\n");
+        return 1;
+    }
+
     auto screen = ScreenInteractive::TerminalOutput();
 
     std::vector<BuildJob> jobs;
     float cpu_usage = 0.0f;
     std::mutex data_mutex;
     int uptime_seconds = 0;
+    bool is_running = true;
 
-    // Background thread: scans processes every second
-    std::thread scanner([&] {
-        while (true) {
-            auto new_jobs = scan_processes();
-            float new_cpu  = get_cpu_usage();
+    if (wrapper_mode) {
+        std::thread runner([&] {
+#ifdef _WIN32
+            FILE* pipe = _popen(wrapper_cmd.c_str(), "r");
+#else
+            FILE* pipe = popen(wrapper_cmd.c_str(), "r");
+#endif
+            if (!pipe) return;
 
+            char buf[512];
+            std::regex cargo_rx(R"(\[(\d+)/(\d+)\])");
+            std::regex webpack_rx(R"((\d+)%)");
+            std::regex make_rx(R"(\[\s*(\d+)%\])");
+            
+            BuildJob w_job = {"wrapped", wrapper_tool, "Running", 0.0f, 0};
+
+            while (fgets(buf, sizeof(buf), pipe)) {
+                std::string line(buf);
+                std::smatch match;
+                try {
+                    if (std::regex_search(line, match, cargo_rx)) {
+                        float current = std::stof(match[1].str());
+                        float total = std::stof(match[2].str());
+                        if (total > 0) w_job.progress = current / total;
+                        w_job.status = "Compiling";
+                    } else if (std::regex_search(line, match, webpack_rx)) {
+                        w_job.progress = std::stof(match[1].str()) / 100.0f;
+                        w_job.status = "Bundling";
+                    } else if (std::regex_search(line, match, make_rx)) {
+                        w_job.progress = std::stof(match[1].str()) / 100.0f;
+                        w_job.status = "Building";
+                    }
+                } catch (...) {}
+
+                {
+                    std::lock_guard<std::mutex> lock(data_mutex);
+                    jobs = {w_job};
+                    cpu_usage = get_cpu_usage();
+                }
+                screen.PostEvent(Event::Custom);
+            }
+#ifdef _WIN32
+            _pclose(pipe);
+#else
+            pclose(pipe);
+#endif
             {
                 std::lock_guard<std::mutex> lock(data_mutex);
-                jobs = new_jobs;
-                cpu_usage = new_cpu;
+                if (!jobs.empty()) {
+                    jobs[0].status = "Finished";
+                    jobs[0].progress = 1.0f;
+                }
+                is_running = false;
+            }
+            screen.PostEvent(Event::Custom);
+        });
+        runner.detach();
+    } else {
+        std::thread scanner([&] {
+            while (true) {
+                auto new_jobs = scan_processes();
+                float new_cpu  = get_cpu_usage();
+
+                {
+                    std::lock_guard<std::mutex> lock(data_mutex);
+                    if (!is_running) break;
+                    jobs = new_jobs;
+                    cpu_usage = new_cpu;
+                }
+
+                screen.PostEvent(Event::Custom); // trigger re-render
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        });
+        scanner.detach();
+    }
+
+    std::thread uptime_tracker([&] {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            {
+                std::lock_guard<std::mutex> lock(data_mutex);
+                if (!is_running) break;
                 uptime_seconds++;
             }
-
-            screen.PostEvent(Event::Custom); // trigger re-render
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            screen.PostEvent(Event::Custom);
         }
     });
-    scanner.detach();
+    uptime_tracker.detach();
 
     auto quit = screen.ExitLoopClosure();
-    auto quit_btn = Button("  Quit (q)  ", quit);
+    auto quit_btn = Button("  Quit (q)  ", [&] {
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            is_running = false;
+        }
+        quit();
+    });
 
     auto layout = Container::Vertical({ quit_btn });
 
@@ -268,7 +362,7 @@ int main() {
             // Header
             hbox({
                 text(" BuildMon ") | bold | color(Color::Cyan),
-                text("v1.0") | color(Color::GrayDark),
+                text(wrapper_mode ? "(Wrapper Mode)" : "v1.0") | color(Color::GrayDark),
                 filler(),
                 text("Active Builds: ") | color(Color::GrayDark),
                 text(std::to_string(jobs.size())) | bold | color(Color::Green),
@@ -297,7 +391,14 @@ int main() {
 
     // Allow 'q' to quit
     auto with_keys = CatchEvent(renderer, [&](Event e) {
-        if (e == Event::Character('q')) { quit(); return true; }
+        if (e == Event::Character('q')) {
+            {
+                std::lock_guard<std::mutex> lock(data_mutex);
+                is_running = false;
+            }
+            quit();
+            return true;
+        }
         return false;
     });
 
