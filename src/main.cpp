@@ -360,6 +360,19 @@ int main(int argc, char** argv) {
             std::regex make_rx(R"(\[\s*(\d+)%\])");
             
             BuildJob w_job = {project_name, tool_name, "Running", 0.0f, 0};
+            
+            // Add job to list immediately so it appears even if quiet
+            {
+                std::lock_guard<std::mutex> lock(data_mutex);
+                bool found = false;
+                for (auto& j : jobs) {
+                    if (j.project == project_name && j.tool == tool_name) {
+                        found = true; break;
+                    }
+                }
+                if (!found) jobs.push_back(w_job);
+            }
+            screen.PostEvent(Event::Custom);
 
             while (fgets(buf, sizeof(buf), pipe)) {
                 std::string line(buf);
@@ -436,25 +449,49 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(data_mutex);
                     if (!is_running) break;
                     
-                    for (const auto& old_job : jobs) {
-                        bool found = false;
-                        for (const auto& new_job : new_jobs) {
-                            if (old_job.project == new_job.project && old_job.pid == new_job.pid) {
-                                found = true;
-                                break;
+                    // 1. Identify jobs that are in 'jobs' but NOT in 'new_jobs'
+                    // If they have a real PID (scanned jobs), they are finished.
+                    // Manual jobs (pid == 0) stay until they finish themselves.
+                    for (auto it = jobs.begin(); it != jobs.end(); ) {
+                        bool found_in_scan = false;
+                        if (it->pid != 0) { // Only check scanned jobs
+                            for (const auto& nj : new_jobs) {
+                                if (it->project == nj.project && it->pid == nj.pid) {
+                                    found_in_scan = true;
+                                    break;
+                                }
                             }
+                        } else {
+                            found_in_scan = true; // Keep manual jobs
                         }
-                        if (!found && old_job.status != "Finished") {
-                            BuildJob fin = old_job;
+
+                        if (!found_in_scan) {
+                            BuildJob fin = *it;
                             fin.status = "Finished";
                             fin.progress = 1.0f;
                             history_jobs.insert(history_jobs.begin(), fin);
                             if (history_jobs.size() > 5) history_jobs.pop_back();
                             if (cfg.notifications) send_notification("Build Finished", "Project: " + fin.project);
+                            it = jobs.erase(it);
+                        } else {
+                            ++it;
                         }
                     }
 
-                    jobs = new_jobs;
+                    // 2. Add/Update jobs from the scan
+                    for (const auto& nj : new_jobs) {
+                        bool existing = false;
+                        for (auto& oj : jobs) {
+                            if (oj.pid == nj.pid && oj.project == nj.project) {
+                                oj.progress = nj.progress;
+                                oj.status = nj.status;
+                                existing = true;
+                                break;
+                            }
+                        }
+                        if (!existing) jobs.push_back(nj);
+                    }
+
                     cpu_usage = new_cpu;
                 }
 
@@ -588,11 +625,21 @@ int main(int argc, char** argv) {
 
         std::string final_cmd = cmd_input_str + " 2>&1";
         if (!dir_input_str.empty()) {
-            final_cmd = "cd " + dir_input_str + " && " + final_cmd;
+            std::string d = dir_input_str;
+            // Quote the path for safety
+            if (d.find(' ') != std::string::npos || d.find('!') != std::string::npos) {
+                d = "\"" + d + "\"";
+            }
+#ifdef _WIN32
+            final_cmd = "cd /d " + d + " && " + final_cmd;
+#else
+            final_cmd = "cd " + d + " && " + final_cmd;
+#endif
         }
 
         run_command_logic(final_cmd, tool, proj);
         cmd_input_str = ""; // Clear after run
+        screen.PostEvent(Event::Custom);
     };
 
     auto run_btn = Button(" [ RUN ] ", run_action, ButtonOption::Animated(Color::Green, Color::Black, Color::GreenLight, Color::White));
