@@ -18,6 +18,12 @@ if (-not (Test-Path $installDir)) {
     New-Item -ItemType Directory -Path $installDir | Out-Null
 }
 
+# Cleanup old buildmon.exe if it exists
+if (Test-Path "$installDir\buildmon.exe") {
+    Remove-Item -Path "$installDir\buildmon.exe" -Force
+    Write-Host "Removed old buildmon.exe from $installDir" -ForegroundColor Yellow
+}
+
 Copy-Item -Path $exePath -Destination $installDir -Force
 Write-Host "Copied buildm-on.exe to $installDir" -ForegroundColor Green
 

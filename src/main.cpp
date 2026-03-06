@@ -330,7 +330,7 @@ void autocomplete_cmd(std::string& input, int& cursor_pos) {
         return;
     }
     
-    std::vector<std::string> known_cmds = {"cargo", "npm", "make", "gcc", "g++", "clang", "cmake", "node", "python3", "go", "buildmon"};
+    std::vector<std::string> known_cmds = {"cargo", "npm", "make", "gcc", "g++", "clang", "cmake", "node", "python3", "go", "buildm-on"};
     std::string best = "";
     std::string input_lower = input;
     std::transform(input_lower.begin(), input_lower.end(), input_lower.begin(), ::tolower);
@@ -429,7 +429,7 @@ int main(int argc, char** argv) {
 #endif
     
     start_server();
-    g_discovery.start(8766, "BUILDMON_DISCOVERY:" + pc_ip);
+    g_discovery.start(8766, "BUILDM-ON_DISCOVERY:" + pc_ip);
 
     // Define the execution logic as a lambda so it can be called from multiple places
     auto run_command_logic = [&](std::string cmd_to_run, std::string tool_name, std::string project_name) {
