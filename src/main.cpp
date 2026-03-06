@@ -17,6 +17,7 @@ using json = nlohmann::json;
 #include <map>
 #include <algorithm>
 #include <regex>
+#include <deque>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -95,6 +96,7 @@ void send_ipc_update(const BuildJob& job) {
 // ─────────────────────────────────────────────
 
 WsServer g_ws_server;
+UdpBroadcaster g_discovery;
 
 json job_to_json(const BuildJob& job) {
     return {
@@ -132,7 +134,7 @@ void broadcast_event(const std::string& type, const BuildJob& job,
     g_ws_server.broadcast(msg.dump());
 }
 
-void start_server(std::vector<BuildJob>*, float*, std::mutex*) {
+void start_server() {
     g_ws_server.start(8765);
 }
 
@@ -384,7 +386,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto screen = ScreenInteractive::TerminalOutput();
+    auto screen = ScreenInteractive::Fullscreen();
     Config cfg = load_config();
 
     std::vector<BuildJob> jobs;
@@ -394,7 +396,40 @@ int main(int argc, char** argv) {
     int uptime_seconds = 0;
     bool is_running = true;
 
-    start_server(&jobs, &cpu_usage, &data_mutex);
+    // Build output log
+    std::deque<std::string> output_lines;
+    int output_scroll_y = 0;
+    const int MAX_OUTPUT_LINES = 500;
+
+    // Get local IP for display & discovery
+    std::string pc_ip = "127.0.0.1";
+#ifdef _WIN32
+    system("ipconfig > ip.txt");
+    std::ifstream ip_file("ip.txt");
+    std::string line;
+    std::vector<std::string> ips;
+    while (std::getline(ip_file, line)) {
+        if (line.find("IPv4 Address") != std::string::npos) {
+            auto pos = line.find(':');
+            if (pos != std::string::npos) {
+                std::string ip = line.substr(pos + 2);
+                // Remove any trailing whitespace
+                ip.erase(ip.find_last_not_of(" \n\r\t") + 1);
+                // Prioritize 192.168.x.x or 10.x.x.x
+                if (ip.find("192.168.") == 0 || ip.find("10.") == 0 || ip.find("172.") == 0) {
+                    pc_ip = ip;
+                    break; 
+                }
+                ips.push_back(ip);
+            }
+        }
+    }
+    if (pc_ip == "127.0.0.1" && !ips.empty()) pc_ip = ips[0];
+    ip_file.close();
+#endif
+    
+    start_server();
+    g_discovery.start(8766, "BUILDMON_DISCOVERY:" + pc_ip);
 
     // Define the execution logic as a lambda so it can be called from multiple places
     auto run_command_logic = [&](std::string cmd_to_run, std::string tool_name, std::string project_name) {
@@ -429,6 +464,10 @@ int main(int argc, char** argv) {
 
             while (fgets(buf, sizeof(buf), pipe)) {
                 std::string line(buf);
+                // Strip trailing \r\n
+                while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+                    line.pop_back();
+
                 std::smatch match;
                 try {
                     if (std::regex_search(line, match, cargo_rx)) {
@@ -462,6 +501,12 @@ int main(int argc, char** argv) {
                     }
                     if (!found) jobs.push_back(w_job);
                     cpu_usage = get_cpu_usage();
+                    // Append to output log
+                    output_lines.push_back(line);
+                    if ((int)output_lines.size() > MAX_OUTPUT_LINES)
+                        output_lines.pop_front();
+                    // Auto-scroll to bottom
+                    output_scroll_y = (int)output_lines.size();
                 }
                 send_ipc_update(w_job);
                 screen.PostEvent(Event::Custom);
@@ -667,14 +712,38 @@ int main(int argc, char** argv) {
     });
     uptime_tracker.detach();
 
+    // ── Pastel palette ──────────────────────────────────────
+    // Soft lavender for primary elements
+    const Color C_LAVENDER   = Color(179, 157, 219); // #B39DDB
+    // Soft mint/teal for accents
+    const Color C_MINT       = Color(128, 203, 196); // #80CBC4
+    // Soft peach for labels
+    const Color C_PEACH      = Color(255, 183, 139); // #FFB78B
+    // Soft pink for highlights
+    const Color C_PINK       = Color(240, 157, 181); // #F09DB5
+    // Muted green for success
+    const Color C_SAGE       = Color(149, 204, 141); // #95CC8D
+    // Soft yellow for warnings
+    const Color C_BUTTER     = Color(255, 220, 130); // #FFDC82
+    // Muted red for errors
+    const Color C_ROSE       = Color(239, 154, 154); // #EF9A9A
+    // Dim gray for secondary text
+    const Color C_MUTED      = Color(150, 150, 160);
+    // Background for header and footer
+    const Color C_DARK_BG    = Color(30, 28, 38);    // deep dark purple
+    // Border color
+    const Color C_BORDER     = C_LAVENDER;
+
     auto quit = screen.ExitLoopClosure();
-    auto quit_btn = Button("  Quit (q)  ", [&] {
+
+    // ── Quit button ─────────────────────────────────────────
+    auto quit_btn = Button(" Quit(q) ", [&] {
         {
             std::lock_guard<std::mutex> lock(data_mutex);
             is_running = false;
         }
         quit();
-    });
+    }, ButtonOption::Animated(Color(80,60,120), C_LAVENDER, Color(100,80,150), Color::White));
 
     std::string dir_input_str = "";
     int dir_cursor = 0;
@@ -693,7 +762,6 @@ int main(int argc, char** argv) {
         std::string proj = "custom";
         if (!dir_input_str.empty()) {
             fs::path p(dir_input_str);
-            // Handle trailing slash by using parent if filename is empty
             if (p.has_filename()) {
                 proj = p.filename().string();
             } else if (p.has_parent_path()) {
@@ -704,7 +772,6 @@ int main(int argc, char** argv) {
         std::string final_cmd = cmd_input_str + " 2>&1";
         if (!dir_input_str.empty()) {
             std::string d = dir_input_str;
-            // Quote the path for safety
             if (d.find(' ') != std::string::npos || d.find('!') != std::string::npos) {
                 d = "\"" + d + "\"";
             }
@@ -715,17 +782,25 @@ int main(int argc, char** argv) {
 #endif
         }
 
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            output_lines.clear();
+            output_scroll_y = 0;
+        }
         run_command_logic(final_cmd, tool, proj);
-        cmd_input_str = ""; // Clear after run
+        cmd_input_str = "";
         screen.PostEvent(Event::Custom);
     };
 
-    auto run_btn = Button(" [ RUN ] ", run_action, ButtonOption::Animated(Color::Green, Color::Black, Color::GreenLight, Color::White));
+    // ── Run button ──────────────────────────────────────────
+    auto run_btn = Button("  Run  ", run_action,
+        ButtonOption::Animated(Color(60,120,80), C_SAGE, Color(80,160,100), Color::White));
 
+    // ── Directory input ─────────────────────────────────────
     InputOption dir_opt = InputOption::Default();
     dir_opt.cursor_position = &dir_cursor;
-    dir_opt.on_enter = run_action;
-    auto dir_input = Input(&dir_input_str, "e.g. ./target", dir_opt);
+    dir_opt.on_enter = [&] { /* move focus to cmd */ screen.PostEvent(Event::TabReverse); };
+    auto dir_input = Input(&dir_input_str, "e.g. /path/to/project", dir_opt);
     auto dir_input_caught = CatchEvent(dir_input, [&](Event e) {
         if (e == Event::Tab) {
             autocomplete_path(dir_input_str, dir_cursor);
@@ -735,6 +810,7 @@ int main(int argc, char** argv) {
         return false;
     });
 
+    // ── Command input ────────────────────────────────────────
     InputOption cmd_opt = InputOption::Default();
     cmd_opt.cursor_position = &cmd_cursor;
     cmd_opt.on_enter = run_action;
@@ -748,29 +824,19 @@ int main(int argc, char** argv) {
         return false;
     });
 
+    // ── Layout container ─────────────────────────────────────
     auto layout = Container::Vertical({
         dir_input_caught,
         cmd_input_caught,
         Container::Horizontal({
             run_btn,
-            quit_btn
+            quit_btn,
         })
     });
 
+    // ── Renderer ─────────────────────────────────────────────
     auto renderer = Renderer(layout, [&]() -> Element {
         std::lock_guard<std::mutex> lock(data_mutex);
-
-        Color primary_color = Color::Cyan;
-        Color accent_color = Color::Green;
-        Color bg_color = Color::Black;
-        
-        if (cfg.theme == "ocean") {
-            primary_color = Color::BlueLight;
-            accent_color = Color::Cyan;
-        } else if (cfg.theme == "matrix") {
-            primary_color = Color::Green;
-            accent_color = Color::GreenLight;
-        }
 
         // Format uptime
         int h = uptime_seconds / 3600;
@@ -779,122 +845,210 @@ int main(int argc, char** argv) {
         char uptime_str[16];
         snprintf(uptime_str, sizeof(uptime_str), "%02d:%02d:%02d", h, m, s);
 
-        // Build job elements
+        // ── Header ───────────────────────────────────────────
+        auto header = hbox({
+            text(" "),
+            text("BuildM-on") | bold | color(C_LAVENDER),
+            text(" "),
+            text(wrapper_mode ? "(Wrapper)" : "v0.1.1") | color(C_MUTED),
+            filler(),
+            text("Active builds: ") | color(C_MUTED),
+            text(std::to_string(jobs.size())) | bold | color(C_MINT),
+            text("  "),
+        });
+
+        // ── Input section ─────────────────────────────────────
+        auto input_section = vbox({
+            hbox({
+                text(" Directory: ") | color(C_PEACH) | size(WIDTH, EQUAL, 13),
+                dir_input_caught->Render() | flex | color(C_MINT),
+            }) | xflex,
+            hbox({
+                text(" Command:   ") | color(C_PEACH) | size(WIDTH, EQUAL, 13),
+                cmd_input_caught->Render() | flex | color(C_BUTTER),
+            }) | xflex,
+            hbox({
+                filler(),
+                run_btn->Render() | color(C_SAGE),
+                text(" "),
+                quit_btn->Render() | color(C_LAVENDER),
+                text(" "),
+            }),
+        });
+
+        // ── Build output log (scrollable) ────────────────────
+        Elements log_lines;
+        if (output_lines.empty()) {
+            log_lines.push_back(
+                text("  Waiting for build output...") | color(C_MUTED)
+            );
+        } else {
+            // Show last N lines that fit
+            for (const auto& l : output_lines) {
+                // Colour lines that contain error keywords
+                Color lc = Color::White;
+                std::string ll = l;
+                std::transform(ll.begin(), ll.end(), ll.begin(), ::tolower);
+                if (ll.find("error") != std::string::npos ||
+                    ll.find("failed") != std::string::npos)
+                    lc = C_ROSE;
+                else if (ll.find("warn") != std::string::npos)
+                    lc = C_BUTTER;
+                else if (ll.find("ok") != std::string::npos ||
+                         ll.find("success") != std::string::npos ||
+                         ll.find("finish") != std::string::npos)
+                    lc = C_SAGE;
+                log_lines.push_back(text(" " + l) | color(lc));
+            }
+        }
+
+        auto output_section = vbox(std::move(log_lines)) | yframe | flex;
+
+        // ── Active build jobs ─────────────────────────────────
         Elements job_elements;
         if (jobs.empty()) {
             job_elements.push_back(
-                text("  No active builds detected.") | color(Color::GrayDark)
-            );
-            job_elements.push_back(
-                text("  Start a build (cargo build, npm run build, make...)") | color(Color::GrayDark)
+                text("  No active builds  ") | color(C_MUTED)
             );
         } else {
             for (auto& job : jobs) {
-                job_elements.push_back(separator());
+                Color scolor = (job.progress >= 1.0f) ? C_SAGE : C_BUTTER;
+                int dur_m = job.duration_seconds / 60;
+                int dur_s = job.duration_seconds % 60;
+                char dur_buf[16];
+                snprintf(dur_buf, sizeof(dur_buf), "%02d:%02d", dur_m, dur_s);
+
                 job_elements.push_back(
                     hbox({
-                        text("  Project : ") | color(primary_color),
-                        text(job.project) | bold
+                        text(" "),
+                        text("●") | color(scolor),
+                        text(" "),
+                        text(job.project) | bold | color(C_LAVENDER),
+                        text(" [") | color(C_MUTED),
+                        text(job.tool) | color(C_MINT),
+                        text("] ") | color(C_MUTED),
+                        text(job.status) | color(scolor),
+                        filler(),
+                        render_progress_bar(job.progress),
+                        text("  "),
+                        text(dur_buf) | color(C_MUTED),
+                        text(" "),
                     })
                 );
-                job_elements.push_back(
-                    hbox({
-                        text("  Tool    : ") | color(primary_color),
-                        text(job.tool)
-                    })
-                );
-                job_elements.push_back(
-                    hbox({
-                        text("  Status  : ") | color(primary_color),
-                        text(job.status) | color(Color::Yellow)
-                    })
-                );
-                job_elements.push_back(
-                    hbox({ text("  "), render_progress_bar(job.progress) })
-                );
-                job_elements.push_back(text(""));
             }
         }
 
-        // Render history
+        // ── History ───────────────────────────────────────────
         Elements hist_elements;
         if (!history_jobs.empty()) {
-            hist_elements.push_back(separator());
-            hist_elements.push_back(text("  Recent History:") | color(Color::GrayDark));
+            hist_elements.push_back(separatorLight());
+            hist_elements.push_back(text("  Recent:") | color(C_MUTED));
             for (const auto& hj : history_jobs) {
-                Color s_color = (hj.status == "Failed") ? Color::Red : Color::Green;
+                Color s_color = (hj.status == "Failed") ? C_ROSE : C_SAGE;
                 hist_elements.push_back(
-                    hbox({ text("  - " + hj.project + " [" + hj.tool + "] "), text(hj.status) | color(s_color) })
+                    hbox({
+                        text("   " + hj.project),
+                        text(" [") | color(C_MUTED),
+                        text(hj.tool) | color(C_MINT),
+                        text("] ") | color(C_MUTED),
+                        text(hj.status) | color(s_color),
+                    })
                 );
             }
-            hist_elements.push_back(text(""));
         }
 
-        // Footer stats
-        Color cpu_color = cpu_usage > 80.0f ? Color::Red
-                        : cpu_usage > 50.0f ? Color::Yellow
-                        : Color::Green;
+        // ── CPU colour ────────────────────────────────────────
+        Color cpu_color = cpu_usage > 80.0f ? C_ROSE
+                        : cpu_usage > 50.0f ? C_BUTTER
+                        : C_SAGE;
 
+        // ── Footer ────────────────────────────────────────────
+        auto footer = hbox({
+            text(" CPU: ") | color(C_MUTED),
+            text(std::to_string((int)cpu_usage) + "%") | color(cpu_color),
+            text("  Uptime: ") | color(C_MUTED),
+            text(uptime_str) | color(C_LAVENDER),
+            text("  IP: ") | color(C_MUTED),
+            text(pc_ip) | color(C_MINT),
+            filler(),
+            text("[Enter] Run  [Tab] Complete  [↑↓] Scroll  [q] Quit ") | color(C_MUTED),
+        });
+
+        // Helper: rounded box
+        // FTXUI doesn't have a built-in rounded border style constant,
+        // so we implement it with a custom BorderStyle struct.
+        // We use the available 'border' decorator and add corner chars via
+        // a custom approach using borderStyled.
+        Decorator rounded_box = [C_BORDER](Element e) {
+            return e | borderStyled(ROUNDED) | color(C_BORDER);
+        };
+
+        // ── Full layout ───────────────────────────────────────
         return vbox({
-            // Header
+            // Title bar
+            header | bgcolor(C_DARK_BG),
+
+            separatorStyled(ROUNDED) | color(C_BORDER),
+
+            // Inputs
+            input_section | rounded_box,
+
+            separatorStyled(ROUNDED) | color(C_BORDER),
+
+            // Output label + scrollable output
             hbox({
-                text(" Buildm-on ") | bold | color(primary_color),
-                text(wrapper_mode ? "(Wrapper Mode)" : "v1.0") | color(Color::GrayDark),
-                filler(),
-                text("Active Builds: ") | color(Color::GrayDark),
-                text(std::to_string(jobs.size())) | bold | color(accent_color),
-                text("  "),
-            }) | bgcolor(bg_color),
+                vbox({
+                    hbox({
+                        text(" Build output") | bold | color(C_MINT),
+                        filler(),
+                        text(std::to_string(output_lines.size()) + " lines ") | color(C_MUTED),
+                    }),
+                    separatorStyled(LIGHT) | color(C_BORDER),
+                    output_section,
+                }) | rounded_box | flex,
 
-            separator(),
+                text(" "),
 
-            // Interactive Inputs
-            vbox({
-                hbox({
-                    text(" Directory: ") | color(primary_color) | size(WIDTH, EQUAL, 12),
-                    dir_input_caught->Render() | flex | borderLight | color(accent_color),
-                }),
-                hbox({
-                    text(" Command:   ") | color(primary_color) | size(WIDTH, EQUAL, 12),
-                    cmd_input_caught->Render() | flex | borderLight | color(accent_color),
-                }),
-                hbox({
-                    filler(),
-                    run_btn->Render(),
-                    text("  "),
-                    quit_btn->Render(),
-                }),
-            }),
+                // Active jobs sidebar
+                vbox({
+                    text(" Jobs ") | bold | color(C_PEACH),
+                    separatorStyled(LIGHT) | color(C_BORDER),
+                    vbox(job_elements) | flex,
+                    vbox(hist_elements),
+                }) | size(WIDTH, EQUAL, 52) | rounded_box,
+            }) | flex,
 
-            separator(),
-
-            // Build jobs
-            vbox(job_elements),
-            vbox(hist_elements),
-
-            separator(),
+            separatorStyled(ROUNDED) | color(C_BORDER),
 
             // Footer
-            hbox({
-                text("  CPU : ") | color(Color::GrayDark),
-                text(std::to_string((int)cpu_usage) + "%") | color(cpu_color),
-                text("   Uptime : ") | color(Color::GrayDark),
-                text(uptime_str),
-                filler(),
-                text(" [ Enter ] to Run   [ Tab ] to Complete   [ q ] to Quit "),
-                text(" "),
-            }),
-        }) | border | color(primary_color);
+            footer | bgcolor(C_DARK_BG),
+        });
     });
 
-    // Allow 'q' to quit
+    // ── Key handling ──────────────────────────────────────────
     auto with_keys = CatchEvent(renderer, [&](Event e) {
+        // Quit
         if (e == Event::Character('q')) {
             {
                 std::lock_guard<std::mutex> lock(data_mutex);
                 is_running = false;
             }
             quit();
+            return true;
+        }
+        // Scroll output up
+        if (e == Event::ArrowUp) {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            if (output_scroll_y > 0) output_scroll_y--;
+            screen.PostEvent(Event::Custom);
+            return true;
+        }
+        // Scroll output down
+        if (e == Event::ArrowDown) {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            if (output_scroll_y < (int)output_lines.size())
+                output_scroll_y++;
+            screen.PostEvent(Event::Custom);
             return true;
         }
         return false;

@@ -264,3 +264,42 @@ private:
         }
     }
 };
+
+// ---- UDP Discovery Broadcaster -----------------------------------
+class UdpBroadcaster {
+public:
+    UdpBroadcaster() {
+#ifdef _WIN32
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2,2), &wsa);
+#endif
+    }
+
+    void start(int port, const std::string& message = "BUILDMON_DISCOVERY") {
+        std::thread([this, port, message]() {
+            sock_t fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd == SOCK_INVALID) return;
+
+            int broadcast = 1;
+#ifdef _WIN32
+            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const char*)&broadcast, sizeof(broadcast));
+#else
+            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+#endif
+
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons((uint16_t)port);
+            addr.sin_addr.s_addr = INADDR_BROADCAST;
+
+            while (true) {
+#ifdef _WIN32
+                sendto(fd, message.c_str(), (int)message.size(), 0, (sockaddr*)&addr, sizeof(addr));
+#else
+                sendto(fd, message.c_str(), message.size(), 0, (sockaddr*)&addr, sizeof(addr));
+#endif
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        }).detach();
+    }
+};
