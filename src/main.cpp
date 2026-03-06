@@ -2,6 +2,9 @@
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/loop.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <nlohmann/json.hpp>
+#include "ws_server.hpp"
+using json = nlohmann::json;
 
 #include <filesystem>
 #include <fstream>
@@ -69,6 +72,7 @@ struct BuildJob {
     std::string status;    // Compiling, Bundling, Linking...
     float progress;        // 0.0 to 1.0
     int pid;
+    int duration_seconds = 0;
 };
 
 void send_ipc_update(const BuildJob& job) {
@@ -84,6 +88,52 @@ void send_ipc_update(const BuildJob& job) {
     }
     close(sock);
 #endif
+}
+
+// ─────────────────────────────────────────────
+// WebSocket Server
+// ─────────────────────────────────────────────
+
+WsServer g_ws_server;
+
+json job_to_json(const BuildJob& job) {
+    return {
+        {"project",          job.project},
+        {"tool",             job.tool},
+        {"status",           job.status},
+        {"progress",         job.progress},
+        {"pid",              job.pid},
+        {"duration_seconds", job.duration_seconds}
+    };
+}
+
+void broadcast_update(const std::vector<BuildJob>& jobs, float cpu) {
+    json msg;
+    msg["type"]         = "update";
+    msg["timestamp"]    = std::time(nullptr);
+    msg["cpu"]          = cpu;
+    msg["active_count"] = jobs.size();
+    msg["builds"]       = json::array();
+    for (const auto& job : jobs)
+        msg["builds"].push_back(job_to_json(job));
+    g_ws_server.broadcast(msg.dump());
+}
+
+void broadcast_event(const std::string& type, const BuildJob& job,
+                     bool success, const std::string& error_line = "") {
+    json msg;
+    msg["type"]             = type;
+    msg["project"]          = job.project;
+    msg["tool"]             = job.tool;
+    msg["duration_seconds"] = job.duration_seconds;
+    msg["success"]          = success;
+    if (!error_line.empty())
+        msg["error_line"]   = error_line;
+    g_ws_server.broadcast(msg.dump());
+}
+
+void start_server(std::vector<BuildJob>*, float*, std::mutex*) {
+    g_ws_server.start(8765);
 }
 
 // ─────────────────────────────────────────────
@@ -344,6 +394,8 @@ int main(int argc, char** argv) {
     int uptime_seconds = 0;
     bool is_running = true;
 
+    start_server(&jobs, &cpu_usage, &data_mutex);
+
     // Define the execution logic as a lambda so it can be called from multiple places
     auto run_command_logic = [&](std::string cmd_to_run, std::string tool_name, std::string project_name) {
         std::thread runner([&, cmd_to_run, tool_name, project_name] {
@@ -360,7 +412,7 @@ int main(int argc, char** argv) {
             std::regex make_rx(R"(\[\s*(\d+)%\])");
             std::regex ready_rx(R"(ready in|Ready in|Network:|Finished|Success|Done|listening on)");
             
-            BuildJob w_job = {project_name, tool_name, "Running", 0.0f, 0};
+            BuildJob w_job = {project_name, tool_name, "Running", 0.0f, 0, 0};
             
             // Add job to list immediately so it appears even if quiet
             {
@@ -429,6 +481,11 @@ int main(int argc, char** argv) {
                         it->progress = 1.0f;
                         history_jobs.insert(history_jobs.begin(), *it);
                         if (history_jobs.size() > 5) history_jobs.pop_back();
+
+                        bool success = (w_job.status == "Finished" || w_job.status == "Ready/Watching");
+                        std::string error_line = success ? "" : "Build command failed"; 
+                        broadcast_event(success ? "finished" : "failed", *it, success, error_line);
+
                         it = jobs.erase(it);
                     } else {
                         ++it;
@@ -476,6 +533,9 @@ int main(int argc, char** argv) {
                             history_jobs.insert(history_jobs.begin(), fin);
                             if (history_jobs.size() > 5) history_jobs.pop_back();
                             if (cfg.notifications) send_notification("Build Finished", "Project: " + fin.project);
+                            
+                            broadcast_event("finished", fin, true, "");
+                            
                             it = jobs.erase(it);
                         } else {
                             ++it;
@@ -589,11 +649,19 @@ int main(int argc, char** argv) {
     std::thread uptime_tracker([&] {
         while (true) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::vector<BuildJob> current_jobs_copy;
+            float current_cpu;
             {
                 std::lock_guard<std::mutex> lock(data_mutex);
                 if (!is_running) break;
                 uptime_seconds++;
+                for (auto& job : jobs) {
+                    job.duration_seconds++;
+                }
+                current_jobs_copy = jobs;
+                current_cpu = cpu_usage;
             }
+            broadcast_update(current_jobs_copy, current_cpu);
             screen.PostEvent(Event::Custom);
         }
     });
