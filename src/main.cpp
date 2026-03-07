@@ -4,7 +4,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <nlohmann/json.hpp>
 #include "ws_server.hpp"
-#include "error_parser.hpp"
+#include "os_utils.hpp"
 #include "plugin_manager.hpp"
 #include "github_actions.hpp"
 
@@ -46,21 +46,6 @@ struct Config {
     int slow_build_threshold_s = 30;
 };
 
-struct BuildJob {
-    std::string project;
-    std::string tool;
-    std::string status;
-    float progress = 0.0f;
-    int pid = 0;
-    int duration_seconds = 0;
-    std::time_t timestamp = 0;
-    std::vector<ParsedError> errors;
-    std::vector<std::string> log_lines;
-    bool auto_scroll = true;
-    int log_scroll_pos = 0;
-    std::time_t start_time = 0;
-};
-
 void to_json(json& j, const BuildJob& b) {
     j = json{
         {"project", b.project}, {"tool", b.tool}, {"status", b.status},
@@ -83,6 +68,40 @@ void from_json(const json& j, BuildJob& b) {
     if (j.contains("errors")) {
         try { b.errors = j.at("errors").get<std::vector<ParsedError>>(); } catch (...) {}
     }
+}
+
+// ─────────────────────────────────────────────
+// WebSocket
+// ─────────────────────────────────────────────
+
+WsServer g_ws_server;
+UdpBroadcaster g_discovery;
+
+void broadcast_update(const std::vector<BuildJob>& jobs, float cpu, float ram) {
+    json msg;
+    msg["type"] = "update";
+    msg["cpu"] = cpu;
+    msg["ram"] = ram;
+    msg["active_count"] = jobs.size();
+    msg["builds"] = json::array();
+    for (const auto& job : jobs) {
+        json b;
+        b["project"]  = job.project;
+        b["tool"]     = job.tool;
+        b["status"]   = job.status;
+        b["progress"] = job.progress;
+        b["pid"]      = job.pid;
+        b["duration"] = job.duration_seconds;
+        b["errors"]   = json::array();
+        for (auto& e : job.errors) {
+            b["errors"].push_back({
+                {"file", e.file}, {"line", e.line},
+                {"message", e.message}, {"severity", severity_str(e.severity)}
+            });
+        }
+        msg["builds"].push_back(b);
+    }
+    g_ws_server.broadcast(msg.dump());
 }
 
 std::string get_history_path() {
@@ -168,165 +187,8 @@ void copy_to_clipboard(const std::string& text) {
 }
 
 // ─────────────────────────────────────────────
-// System Stats
-// ─────────────────────────────────────────────
-
-float get_ram_usage() {
-#ifdef _WIN32
-    return 0.0f;
-#else
-    std::ifstream f("/proc/meminfo");
-    std::string key;
-    long total = 0, available = 0;
-    while (f >> key) {
-        if (key == "MemTotal:") f >> total;
-        else if (key == "MemAvailable:") f >> available;
-    }
-    if (total == 0) return 0.0f;
-    return 100.0f * (1.0f - (float)available / total);
-#endif
-}
-
-float get_cpu_usage() {
-#ifdef _WIN32
-    return 0.0f;
-#else
-    static long prev_idle = 0, prev_total = 0;
-    std::ifstream f("/proc/stat");
-    std::string line;
-    if (std::getline(f, line)) {
-        std::istringstream ss(line);
-        std::string cpu;
-        long u, n, s, i, iw, irq, si;
-        if (!(ss >> cpu >> u >> n >> s >> i >> iw >> irq >> si)) return 0.0f;
-        long total = u + n + s + i + iw + irq + si;
-        long diff_idle = i - prev_idle;
-        long diff_total = total - prev_total;
-        prev_idle = i; prev_total = total;
-        if (diff_total == 0) return 0.0f;
-        return 100.0f * (1.0f - (float)diff_idle / diff_total);
-    }
-    return 0.0f;
-#endif
-}
-
-struct NetStats { float down; float up; };
-NetStats get_net_stats() {
-#ifdef _WIN32
-    return {0, 0};
-#else
-    static long long prev_rx = 0, prev_tx = 0;
-    std::ifstream f("/proc/net/dev");
-    std::string line;
-    long long rx = 0, tx = 0;
-    if (f.is_open()) {
-        while (std::getline(f, line)) {
-            if (line.find(":") != std::string::npos) {
-                std::stringstream ss(line.substr(line.find(":") + 1));
-                long long r, t, junk;
-                if (!(ss >> r)) continue;
-                for (int i = 0; i < 7; i++) ss >> junk;
-                if (!(ss >> t)) continue;
-                rx += r; tx += t;
-            }
-        }
-    }
-    float drx = (rx - prev_rx) / 1024.0f / 1024.0f;
-    float dtx = (tx - prev_tx) / 1024.0f / 1024.0f;
-    prev_rx = rx; prev_tx = tx;
-    return {std::max(0.0f, drx), std::max(0.0f, dtx)};
-#endif
-}
-
-// ─────────────────────────────────────────────
 // WebSocket
 // ─────────────────────────────────────────────
-
-WsServer g_ws_server;
-UdpBroadcaster g_discovery;
-
-void broadcast_update(const std::vector<BuildJob>& jobs, float cpu, float ram) {
-    json msg;
-    msg["type"] = "update";
-    msg["cpu"] = cpu;
-    msg["ram"] = ram;
-    msg["active_count"] = jobs.size();
-    msg["builds"] = json::array();
-    for (const auto& job : jobs) {
-        json b;
-        b["project"]  = job.project;
-        b["tool"]     = job.tool;
-        b["status"]   = job.status;
-        b["progress"] = job.progress;
-        b["pid"]      = job.pid;
-        b["duration"] = job.duration_seconds;
-        b["errors"]   = json::array();
-        for (auto& e : job.errors) {
-            b["errors"].push_back({
-                {"file", e.file}, {"line", e.line},
-                {"message", e.message}, {"severity", severity_str(e.severity)}
-            });
-        }
-        msg["builds"].push_back(b);
-    }
-    g_ws_server.broadcast(msg.dump());
-}
-
-// ─────────────────────────────────────────────
-// Process Scanner
-// ─────────────────────────────────────────────
-
-const std::map<std::string, std::string> BUILD_TOOLS = {
-    {"cargo",   "Rust"}, {"npm",    "Node"}, {"make",  "Make"},
-    {"gcc",     "C/C++"}, {"g++",  "C/C++"}, {"clang", "C/C++"},
-    {"go",      "Go"}, {"cmake", "CMake"}, {"bazel",  "Bazel"},
-    {"gradle",  "Gradle"}, {"mvn", "Maven"}, {"yarn",  "Node"},
-    {"bun",     "Node"}, {"tsc",  "TypeScript"}, {"webpack", "Node"}
-};
-
-std::string get_proc_cmdline(int pid) {
-    std::ifstream f("/proc/" + std::to_string(pid) + "/cmdline");
-    std::string line, result;
-    if (std::getline(f, line)) {
-        for (char c : line) result += (c == '\0') ? ' ' : c;
-    }
-    return result;
-}
-
-std::string get_proc_cwd(int pid) {
-#ifndef _WIN32
-    char buf[512];
-    ssize_t len = readlink(("/proc/" + std::to_string(pid) + "/cwd").c_str(), buf, sizeof(buf) - 1);
-    if (len != -1) { buf[len] = '\0'; return std::string(buf); }
-#endif
-    return "";
-}
-
-std::vector<BuildJob> scan_processes() {
-    std::vector<BuildJob> j;
-    std::error_code ec;
-    if (!fs::exists("/proc", ec)) return j;
-    for (auto& entry : fs::directory_iterator("/proc", ec)) {
-        std::string name = entry.path().filename().string();
-        if (!std::all_of(name.begin(), name.end(), ::isdigit)) continue;
-        int pid = std::stoi(name);
-        std::string cmd = get_proc_cmdline(pid);
-        for (auto& [tool, label] : BUILD_TOOLS) {
-            if (cmd.find(tool) != std::string::npos) {
-                std::string cwd = get_proc_cwd(pid);
-                std::string proj = cwd.empty() ? "unknown" : fs::path(cwd).filename().string();
-                BuildJob bj;
-                bj.project = proj; bj.tool = tool; bj.status = "Active";
-                bj.progress = 0.5f; bj.pid = pid;
-                bj.timestamp = std::time(nullptr);
-                bj.start_time = std::time(nullptr);
-                j.push_back(bj);
-                break;
-            }
-        }
-    }
-    return j;
-}
 
 // ─────────────────────────────────────────────
 // Formatting Helpers
@@ -571,10 +433,11 @@ int main(int argc, char** argv) {
         }
         while (true) {
             std::lock_guard<std::mutex> lk(state.mtx);
-            auto new_jobs = scan_processes();
-            state.cpu = get_cpu_usage();
-            state.ram = get_ram_usage();
-            state.net = get_net_stats();
+            auto new_jobs = OSUtils::scan_processes();
+            auto sys = OSUtils::get_system_stats();
+            state.cpu = sys.cpu;
+            state.ram = sys.ram;
+            state.net = OSUtils::get_net_stats();
             for (auto& nj : new_jobs) {
                 bool exists = false;
                 for (auto& oj : state.jobs) if (oj.pid == nj.pid) { exists = true; break; }
@@ -598,11 +461,12 @@ int main(int argc, char** argv) {
         while (is_running) {
             {
                 std::lock_guard<std::mutex> lk(state.mtx);
-                state.cpu = get_cpu_usage();
-                state.ram = get_ram_usage();
-                state.net = get_net_stats();
+                auto sys = OSUtils::get_system_stats();
+                state.cpu = sys.cpu;
+                state.ram = sys.ram;
+                state.net = OSUtils::get_net_stats();
                 state.uptime_secs++;
-                auto new_scanned = scan_processes();
+                auto new_scanned = OSUtils::scan_processes();
                 for (auto& nj : new_scanned) {
                     bool exists = false;
                     for (auto& oj : state.jobs) if (oj.pid == nj.pid) { oj.status = "Active"; exists = true; break; }

@@ -37,3 +37,11 @@ if(WIN32)
 endif()
 
 install(TARGETS buildm-on RUNTIME DESTINATION bin)
+
+if(WIN32)
+  set(CPACK_GENERATOR "NSIS")
+  set(CPACK_PACKAGE_NAME "Buildm-on")
+  set(CPACK_PACKAGE_VENDOR "Buildm-on Developers")
+  set(CPACK_PACKAGE_VERSION "1.5.0")
+  include(CPack)
+endif()

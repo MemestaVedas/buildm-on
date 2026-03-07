@@ -194,6 +194,25 @@ function shell.exec(cmd)
     return r
 end
 
+ui = {}
+function ui.show_banner(msg) io.write("[plugin] " .. msg .. "\n") end
+function ui.append_log(msg)  io.write("[plugin] " .. msg .. "\n") end
+)";
+
+#ifdef _WIN32
+        s += R"lua(
+notify = {}
+function notify.desktop(title, body)
+    local ps = 'powershell.exe -w hidden -Command "Add-Type -AssemblyName System.Windows.Forms; ' ..
+               '[System.Windows.Forms.MessageBox]::Show(\'' .. string.gsub((body or ""), "'", "''") .. '\', \'' .. string.gsub(title, "'", "''") .. '\')"'
+    os.execute(ps)
+end
+function notify.sound(path)
+    os.execute('powershell -w hidden -c "(new-object System.Media.SoundPlayer \'' .. path .. '\').PlaySync()"')
+end
+)lua";
+#else
+        s += R"lua(
 notify = {}
 function notify.desktop(title, body)
     os.execute('notify-send "' .. title .. '" "' .. (body or "") .. '" &')
@@ -201,11 +220,8 @@ end
 function notify.sound(path)
     os.execute('paplay "' .. path .. '" 2>/dev/null || aplay "' .. path .. '" 2>/dev/null &')
 end
-
-ui = {}
-function ui.show_banner(msg) io.write("[plugin] " .. msg .. "\n") end
-function ui.append_log(msg)  io.write("[plugin] " .. msg .. "\n") end
-)";
+)lua";
+#endif
 
         // Inject build context object
         s += "build = {\n";
