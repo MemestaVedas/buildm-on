@@ -6,27 +6,27 @@ A real-time terminal build monitor in C++ with FTXUI. Buildm-on detects and trac
 
 ## Features ✨
 
-* **Multi-Tab Interactive Dashboard**: Seamlessly switch between the live dashboard, build launcher, history, and help menus.
-* **Mobile Connectivity**: Sync build progress to your mobile device over WiFi. Supports automatic discovery via UDP.
-* **Interactive Build Launcher**: Start new builds directly from within the TUI. Specify directory and command, and monitor output in real-time.
-* **Zero-Setup Process Scanning**: Automatically discovers active builds running anywhere on the OS by scanning `/proc`.
-* **Persistent Build History**: Keeps track of your build history across sessions, saved to `~/.buildm-on_history.json`.
-* **Desktop Notifications**: Uses `notify-send` on Linux to alert you when builds finish.
-* **Enhanced System Stats**: Live telemetry for CPU, RAM usage, and Network (Up/Down) speeds.
+* **Multi-Tab Interactive Dashboard**: Seamlessly switch between 7 specialized tabs: Dashboard, Run, Log, History, Errors, Plugins, and Visualize.
+* **Smart Error Intelligence**: Automatic parsing and highlighting for Rust (`cargo`), C++ (`gcc`, `clang`), TypeScript (`tsc`), Node.js stack traces, and Webpack/Vite.
+* **Visualize Tab**: Real-time Gantt timelines for build execution and side-by-side history comparisons.
+* **Lua Plugin System**: Extensible scripting for webhooks, custom notifications (`webhook-notifier.lua`), and sound alerts (`sound-alerts.lua`).
+* **CI/CD Integration**: Real-time polling of GitHub Actions workflow runs displayed as virtual builds.
+* **Mobile Connectivity**: Sync progress to mobile over WiFi with RFC 6455 WebSocket support and UDP discovery.
+* **Cross-Platform Support**: Native support for Linux and Windows (Win32/PowerShell).
+* **Enhanced System Stats**: Live telemetry for CPU, RAM, and Network usage.
+* **Sound Alerts**: Configurable audio feedback for build success/failure.
 
 ## Requirements 🐧
 
-This application natively leverages specific Linux APIs:
-- `/proc` (for discovering running processes and system stats)
-- `inotify` (for file-system watcher mode)
-- `WebSockets` (for mobile app syncing)
-- `UDP Broadcast` (for mobile discovery)
+**Operating Systems**:
+- **Linux**: Native `/proc` scanning and `notify-send`.
+- **Windows**: Native Win32 API integration and PowerShell notifications.
 
-**Operating System**: Linux (native) or WSL2.
 **Dependencies**:
-* A C++17 compliant compiler (`g++` 11+ or `clang`)
+* A C++17 compliant compiler (`g++` 11+, `clang`, or `MSVC`)
 * CMake (3.14+)
-* `nlohmann-json` and `FTXUI` (automatically pulled by CMake)
+* Lua 5.4+ (for plugins)
+* `nlohmann-json` and `FTXUI` (pulled by CMake)
 
 ## Installation 🛠️
 
@@ -56,8 +56,12 @@ buildm-on
 ```
 
 ### Navigation & Shortcuts
-- **1-4**: Switch between Dashboard, Launcher, History, and Help tabs.
-- **Tab**: Cycle through input fields in the "Run Command" tab.
+- **1-7**: Switch between Dashboard, Run, Log, History, Errors, Plugins, and Visualize tabs.
+- **Tab**: Cycle through input fields in the "Run" tab.
+- **S**: Toggle auto-scroll in the Log view.
+- **C**: Copy structured errors to clipboard (available in Failure Overlay and Errors tab).
+- **E/D**: Enable/Disable selected plugin in the Plugins tab.
+- **R**: Reload all plugins.
 - **Enter**: Start a build in the Launcher.
 - **q**: Quit the application.
 
