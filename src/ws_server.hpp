@@ -126,6 +126,7 @@ class WsServer {
 public:
     std::mutex clients_mutex;
     std::set<std::shared_ptr<WsConn>> clients;
+    std::function<void(std::shared_ptr<WsConn>, const std::string&)> on_message;
 
     WsServer() {
 #ifdef _WIN32
@@ -234,7 +235,9 @@ private:
                     std::lock_guard<std::mutex> lk(clients_mutex);
                     clients.insert(conn);
                 }
-                char buf[256];
+                
+                std::vector<uint8_t> buffer;
+                char buf[4096];
                 while (true) {
 #ifdef _WIN32
                     int n = recv(client_fd, buf, sizeof(buf), 0);
@@ -242,7 +245,50 @@ private:
                     int n = ::recv(client_fd, buf, sizeof(buf), 0);
 #endif
                     if (n <= 0) break;
+                    buffer.insert(buffer.end(), buf, buf + n);
+                    
+                    while (buffer.size() >= 2) {
+                        uint8_t b0 = buffer[0];
+                        uint8_t b1 = buffer[1];
+                        int opcode = b0 & 0x0F;
+                        bool masked = (b1 & 0x80) != 0;
+                        uint64_t payload_len = b1 & 0x7F;
+                        size_t header_len = 2;
+                        
+                        if (payload_len == 126) {
+                            if (buffer.size() < 4) break;
+                            payload_len = (buffer[2] << 8) | buffer[3];
+                            header_len = 4;
+                        } else if (payload_len == 127) {
+                            if (buffer.size() < 10) break;
+                            payload_len = 0;
+                            for (int i=0; i<8; i++) payload_len = (payload_len << 8) | buffer[2+i];
+                            header_len = 10;
+                        }
+                        
+                        uint8_t masking_key[4] = {0};
+                        if (masked) {
+                            if (buffer.size() < header_len + 4) break;
+                            for (int i=0; i<4; i++) masking_key[i] = buffer[header_len + i];
+                            header_len += 4;
+                        }
+                        
+                        if (buffer.size() < header_len + payload_len) break;
+                        
+                        if (opcode == 1) { // Text
+                            std::string payload;
+                            for (size_t i = 0; i < payload_len; i++) {
+                                payload += (char)(buffer[header_len + i] ^ (masked ? masking_key[i % 4] : 0));
+                            }
+                            if (on_message) on_message(conn, payload);
+                        } else if (opcode == 8) { // Close
+                            goto client_disconnect;
+                        }
+                        
+                        buffer.erase(buffer.begin(), buffer.begin() + header_len + payload_len);
+                    }
                 }
+            client_disconnect:
                 std::lock_guard<std::mutex> lk(clients_mutex);
                 clients.erase(conn);
             }).detach();

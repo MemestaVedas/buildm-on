@@ -6,6 +6,7 @@
 #include "ws_server.hpp"
 #include "error_parser.hpp"
 #include "plugin_manager.hpp"
+#include "github_actions.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -405,6 +406,7 @@ struct AppState {
     bool clipboard_copied = false;
     std::string copy_feedback;
     PluginManager plugins;
+    gh::ActionsPoller gh_poller;
 };
 
 // ─────────────────────────────────────────────
@@ -426,12 +428,14 @@ int main(int argc, char** argv) {
     AppState state;
     state.cfg     = load_config();
     state.history = load_history();
+#ifndef _WIN32
+    if (const char* home_val = getenv("HOME")) state.gh_poller.load_from_config(home_val);
+#endif
+    state.gh_poller.start_polling();
 
     ErrorParser parser;
     PluginManager::ensure_builtin_plugins();
     state.plugins.load_plugins();
-    g_ws_server.start(8765);
-    g_discovery.start(8766, "BUILDM-ON_DISCOVERY");
 
     // ── Build runner ─────────────────────────────
     auto run_cmd_logic = [&](std::string cmd, std::string tool, std::string proj) {
@@ -510,6 +514,53 @@ int main(int argc, char** argv) {
             state.plugins.fire("build_end", pctx_end);
         }).detach();
     };
+
+    g_ws_server.on_message = [&](std::shared_ptr<WsConn> conn, const std::string& msg) {
+        try {
+            json req = json::parse(msg);
+            std::string type = req.value("type", "");
+            if (type == "start_build") {
+                std::string cmd = req.value("command", "");
+                std::string dir = req.value("directory", "");
+                if (cmd.empty()) return;
+                std::string tool = cmd.substr(0, cmd.find(' '));
+                std::string proj = dir.empty() ? "remote" : fs::path(dir).filename().string();
+                std::string final_cmd = cmd + " 2>&1";
+                if (!dir.empty()) final_cmd = "cd " + dir + " && " + final_cmd;
+                run_cmd_logic(final_cmd, tool, proj);
+            } 
+            else if (type == "stop_build") {
+                int pid = req.value("pid", 0);
+                if (pid > 0) {
+                    std::string kill_cmd = "kill -9 " + std::to_string(pid) + " 2>/dev/null";
+                    auto sys_ret = system(kill_cmd.c_str());
+                    (void)sys_ret;
+                }
+            }
+            else if (type == "get_history") {
+                json resp;
+                resp["type"] = "history";
+                resp["history"] = json::array();
+                {
+                    std::lock_guard<std::mutex> lk(state.mtx);
+                    for (auto& h : state.history) {
+                        json b;
+                        b["project"] = h.project;
+                        b["tool"] = h.tool;
+                        b["status"] = h.status;
+                        b["duration"] = h.duration_seconds;
+                        b["errors"] = h.errors.size();
+                        b["timestamp"] = (long long)h.timestamp;
+                        resp["history"].push_back(b);
+                    }
+                }
+                conn->send_text(resp.dump());
+            }
+        } catch (...) {}
+    };
+
+    g_ws_server.start(8765);
+    g_discovery.start(8766, "BUILDM-ON_DISCOVERY");
 
     // ── No-TUI daemon mode ────────────────────────
     if (no_tui) {
@@ -640,6 +691,27 @@ int main(int argc, char** argv) {
         left_col.push_back(hbox({text(" ACTIVE BUILDS (" + std::to_string(state.jobs.size()) + ")") | bold | color(Color::Cyan), filler()}));
         left_col.push_back(separator());
         for (auto& e : build_rows) left_col.push_back(e);
+        
+        std::vector<gh::WorkflowRun> active_runs;
+        { std::lock_guard<std::mutex> lk(state.gh_poller.mtx); active_runs = state.gh_poller.active_runs; }
+        if (!active_runs.empty() || state.gh_poller.config_loaded) {
+            left_col.push_back(text(" ") | size(HEIGHT, EQUAL, 1));
+            left_col.push_back(hbox({text(" GITHUB ACTIONS (" + std::to_string(active_runs.size()) + ")") | bold | color(Color::Cyan), filler()}));
+            left_col.push_back(separator());
+            if (active_runs.empty()) {
+                left_col.push_back(text("  No active GitHub Actions.") | dim);
+            } else {
+                for (auto& wr : active_runs) {
+                    left_col.push_back(hbox({
+                        text("  [GH] "),
+                        text(wr.repo + ":" + wr.head_branch) | bold | size(WIDTH, EQUAL, 20),
+                        text(wr.name) | dim | size(WIDTH, EQUAL, 16),
+                        text((wr.status == "in_progress" ? "Running" : "Queued")) | color(Color::Yellow) | size(WIDTH, EQUAL, 9)
+                    }) | size(HEIGHT, EQUAL, 1));
+                }
+            }
+        }
+
         for (auto& e : diff_els)  left_col.push_back(e);
 
         return hbox({
@@ -866,17 +938,35 @@ int main(int argc, char** argv) {
     auto renderer = Renderer(main_container, [&] {
         tab_entries = make_tab_entries();
 
+        std::string gh_badge = "";
+        if (state.gh_poller.config_loaded) {
+            std::lock_guard<std::mutex> lk(state.gh_poller.mtx);
+            int running = 0, queued = 0;
+            for (auto& wr : state.gh_poller.active_runs) {
+                if (wr.status == "in_progress") running++;
+                else if (wr.status == "queued") queued++;
+            }
+            if (running > 0 || queued > 0) {
+                gh_badge = " GH Actions: " + std::to_string(running) + " run, " + std::to_string(queued) + " wait ";
+            } else {
+                gh_badge = " GH Actions: idle ";
+            }
+        }
+
+        Element top_bar = hbox({
+            text(" Buildm-on v1.5 ") | bold | bgcolor(Color::Blue) | color(Color::White),
+            gh_badge.empty() ? text("") : text(gh_badge) | bold | bgcolor(Color::White) | color(Color::Black),
+            filler(),
+            text("WS:") | color(Color::GrayLight),
+            text(g_ws_server.is_active() ? " Live " : " Wait ") | color(g_ws_server.is_active() ? Color::Green : Color::Yellow),
+            text("| CPU:") | color(Color::GrayLight),
+            text(std::to_string((int)state.cpu) + "% ") | color(Color::Yellow),
+            text("RAM:") | color(Color::GrayLight),
+            text(std::to_string((int)state.ram) + "% ") | color(Color::Magenta)
+        });
+
         Element base = vbox({
-            hbox({
-                text(" Buildm-on v1.5 ") | bold | bgcolor(Color::Blue) | color(Color::White),
-                filler(),
-                text("WS:") | color(Color::GrayLight),
-                text(g_ws_server.is_active() ? " Live " : " Wait ") | color(g_ws_server.is_active() ? Color::Green : Color::Yellow),
-                text("| CPU:") | color(Color::GrayLight),
-                text(std::to_string((int)state.cpu) + "% ") | color(Color::Yellow),
-                text("RAM:") | color(Color::GrayLight),
-                text(std::to_string((int)state.ram) + "% ") | color(Color::Magenta)
-            }) | border,
+            top_bar | border,
             tab_menu->Render() | hcenter | color(Color::Cyan),
             tab_container->Render() | flex,
             text("  q:Quit  1-6:Tabs  S:Scroll  C:Copy-errors  Enter:Confirm  Esc:Dismiss") | dim
