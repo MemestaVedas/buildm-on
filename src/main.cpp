@@ -8,6 +8,14 @@
 #include "plugin_manager.hpp"
 #include "github_actions.hpp"
 
+#include "ui/theme.hpp"
+#include "ui/statusbar.hpp"
+#include "ui/buildcard.hpp"
+#include "ui/errorpanel.hpp"
+#include "ui/widgets.hpp"
+#include "ui/dashboard.hpp"
+#include "ui/launcher.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -191,27 +199,64 @@ void copy_to_clipboard(const std::string& text) {
 // ─────────────────────────────────────────────
 
 // ─────────────────────────────────────────────
-// Formatting Helpers
+// UI Data Conversion Helpers
 // ─────────────────────────────────────────────
 
-std::string format_duration(int seconds) {
-    int h = seconds / 3600;
-    int m = (seconds % 3600) / 60;
-    int s = seconds % 60;
-    char buf[16];
-    if (h > 0) std::snprintf(buf, sizeof(buf), "%02dh%02dm%02ds", h, m, s);
-    else if (m > 0) std::snprintf(buf, sizeof(buf), "%02dm%02ds", m, s);
-    else std::snprintf(buf, sizeof(buf), "%ds", s);
-    return std::string(buf);
+UI::BuildStatus to_ui_status(const std::string& s) {
+    if (s == "Building" || s == "Active") return UI::BuildStatus::Running;
+    if (s == "Finished") return UI::BuildStatus::Success;
+    if (s == "Failed") return UI::BuildStatus::Failed;
+    if (s == "Queued") return UI::BuildStatus::Pending;
+    return UI::BuildStatus::Cancelled;
 }
 
-std::string format_timestamp(std::time_t t) {
-    if (t == 0) return "—";
-    char buf[32];
-    struct tm* tm_info = localtime(&t);
-    if (!tm_info) return "—";
-    strftime(buf, sizeof(buf), "%m-%d %H:%M", tm_info);
-    return std::string(buf);
+UI::BuildEntry to_ui_build(const BuildJob& b) {
+    UI::BuildEntry e;
+    e.pid = b.pid;
+    e.tool = b.tool;
+    e.icon = (b.tool == "cargo" ? "🦀" : (b.tool == "npm" ? "📦" : "🔧"));
+    e.command = b.project; // In existing app, project often holds the cmd or name
+    e.directory = "";
+    e.status = to_ui_status(b.status);
+    e.progress = b.progress;
+    e.elapsed_secs = b.duration_seconds;
+    e.error_count = b.errors.size();
+    e.detail = b.status;
+    return e;
+}
+
+UI::ErrorSeverity to_ui_severity(ErrorSeverity s) {
+    switch (s) {
+        case ErrorSeverity::Error: return UI::ErrorSeverity::Error;
+        case ErrorSeverity::Warning: return UI::ErrorSeverity::Warning;
+        case ErrorSeverity::Hint: return UI::ErrorSeverity::Hint;
+        case ErrorSeverity::Note: return UI::ErrorSeverity::Note;
+    }
+    return UI::ErrorSeverity::Error;
+}
+
+UI::ErrorEntry to_ui_error(const ParsedError& p) {
+    UI::ErrorEntry e;
+    e.severity = to_ui_severity(p.severity);
+    e.diff_state = p.is_new ? UI::ErrorDiffState::New : UI::ErrorDiffState::Persisting;
+    e.file = p.file;
+    e.line = p.line;
+    e.col = p.col;
+    e.code = p.code;
+    e.message = p.message;
+    
+    // Extract first line of context as snippet
+    if (!p.context.empty()) {
+        std::stringstream ss(p.context);
+        std::string line;
+        while (std::getline(ss, line)) {
+            if (line.find(">>") == 0) {
+                e.snippet_line = line.substr(2); // Remove ">>"
+                break;
+            }
+        }
+    }
+    return e;
 }
 
 // ─────────────────────────────────────────────
@@ -269,6 +314,18 @@ struct AppState {
     std::string copy_feedback;
     PluginManager plugins;
     gh::ActionsPoller gh_poller;
+    int active_error_idx = 0;
+
+    // Tabs & UI state
+    int active_tab = 0;
+
+    // Inputs for Launcher
+    std::string launcher_dir_input;
+    std::string launcher_cmd_input;
+
+    // Bridge structs for UI
+    UI::DashboardState dash_state;
+    UI::LauncherState  launcher_state;
 };
 
 // ─────────────────────────────────────────────
@@ -300,8 +357,8 @@ int main(int argc, char** argv) {
     state.plugins.load_plugins();
 
     // ── Build runner ─────────────────────────────
-    auto run_cmd_logic = [&](std::string cmd, std::string tool, std::string proj) {
-        std::thread([&state, &parser, cmd, tool, proj]() {
+    auto run_cmd_logic = [&](std::string cmd, std::string tool, std::string proj, std::string project_dir = "") {
+        std::thread([&state, &parser, cmd, tool, proj, project_dir]() {
             FILE* pipe = popen(cmd.c_str(), "r");
             if (!pipe) return;
             {
@@ -332,7 +389,7 @@ int main(int argc, char** argv) {
                         j.log_lines.push_back(line);
                         if (j.log_lines.size() > 500) j.log_lines.erase(j.log_lines.begin());
                         j.progress = std::min(j.progress + 0.02f, 0.95f);
-                        auto errs = parser.parse({line}, tool);
+                        auto errs = parser.parse({line}, project_dir, tool);
                         j.errors.insert(j.errors.end(), errs.begin(), errs.end());
                         state.all_errors.insert(state.all_errors.end(), errs.begin(), errs.end());
                     }
@@ -341,7 +398,7 @@ int main(int argc, char** argv) {
             int exit_code = pclose(pipe);
             bool success = (exit_code == 0);
 
-            auto final_errors = parser.parse(output_lines, tool);
+            auto final_errors = parser.parse(output_lines, project_dir, tool);
 
             std::lock_guard<std::mutex> lk(state.mtx);
             for (auto it = state.jobs.begin(); it != state.jobs.end(); ) {
@@ -351,6 +408,11 @@ int main(int argc, char** argv) {
                     it->duration_seconds = (int)(std::time(nullptr) - it->start_time);
                     it->errors   = final_errors;
                     state.last_diff  = diff_errors(state.prev_errors, final_errors);
+                    for (auto& e : final_errors) {
+                        for (auto& ne : state.last_diff.new_errors) {
+                            if (error_key(e) == error_key(ne)) { e.is_new = true; break; }
+                        }
+                    }
                     state.prev_errors = final_errors;
                     if (!success) {
                         state.show_failure_overlay = true;
@@ -388,8 +450,7 @@ int main(int argc, char** argv) {
                 std::string tool = cmd.substr(0, cmd.find(' '));
                 std::string proj = dir.empty() ? "remote" : fs::path(dir).filename().string();
                 std::string final_cmd = cmd + " 2>&1";
-                if (!dir.empty()) final_cmd = "cd " + dir + " && " + final_cmd;
-                run_cmd_logic(final_cmd, tool, proj);
+                run_cmd_logic(final_cmd, tool, proj, dir);
             } 
             else if (type == "stop_build") {
                 int pid = req.value("pid", 0);
@@ -484,579 +545,151 @@ int main(int argc, char** argv) {
     }).detach();
 
     // ── Input components ──────────────────────────
-    std::string cmd_str = "", dir_str = "";
-    auto dir_input = Input(&dir_str, "Directory (e.g. ~/my-app)");
-    auto cmd_input = Input(&cmd_str, "Command (e.g. cargo build)");
-    auto run_btn = Button(" > RUN BUILD ", [&] {
-        if (cmd_str.empty()) return;
-        std::string tool = cmd_str.substr(0, cmd_str.find(' '));
-        std::string proj = dir_str.empty() ? "terminal" : fs::path(dir_str).filename().string();
-        std::string final_cmd = cmd_str + " 2>&1";
-        if (!dir_str.empty()) final_cmd = "cd " + dir_str + " && " + final_cmd;
-        run_cmd_logic(final_cmd, tool, proj);
-        cmd_str = "";
-    }, ButtonOption::Animated(Color::Green, Color::White));
+    auto dir_input = Input(&state.launcher_dir_input, "Directory (e.g. ~/my-app)");
+    auto cmd_input = Input(&state.launcher_cmd_input, "Command (e.g. cargo build)");
 
-    // ── Dummy component for pure renderers ────────
-    auto empty_comp = Container::Vertical({});
-
-    // ═══════════════════════════════════════
-    // TAB 1: Dashboard
-    // ═══════════════════════════════════════
-    auto dashboard_view = Renderer(empty_comp, [&] {
+    // ── Renderer: assembling from modular parts ──
+    auto renderer = Renderer(Container::Vertical({dir_input, cmd_input}), [&]() -> Element {
         std::lock_guard<std::mutex> lk(state.mtx);
-        Elements build_rows;
-        if (state.jobs.empty()) {
-            build_rows.push_back(text("  No active builds detected.") | dim);
-        } else {
-            for (auto& j : state.jobs) {
-                bool slow = (j.duration_seconds > state.cfg.slow_build_threshold_s);
-                Color dur_color = slow ? Color::Red : Color::GrayLight;
-                std::string err_badge = " [" + std::to_string(j.errors.size()) + " err]";
-                Color err_color = j.errors.empty() ? Color::GrayDark : Color::Red;
-                build_rows.push_back(hbox({
-                    text("  "),
-                    text(j.project) | bold | size(WIDTH, EQUAL, 16),
-                    text(j.tool) | dim | size(WIDTH, EQUAL, 8),
-                    text(j.status) | color(j.status == "Building" ? Color::Yellow : Color::Cyan) | size(WIDTH, EQUAL, 9),
-                    render_progress_bar(j.progress),
-                    filler(),
-                    text(format_duration(j.duration_seconds)) | color(dur_color),
-                    slow ? text(" SLOW") | color(Color::Red) : text(""),
-                    text(err_badge) | color(err_color)
-                }) | size(HEIGHT, EQUAL, 1));
-            }
-        }
 
-        // Diff banner
-        Elements diff_els;
-        auto& diff = state.last_diff;
-        if (!diff.new_errors.empty() || !diff.resolved_errors.empty() || !diff.persisting.empty()) {
-            diff_els.push_back(separator());
-            diff_els.push_back(hbox({
-                text("  Delta: "),
-                text("+" + std::to_string(diff.new_errors.size()) + " new ") | color(Color::Red),
-                text("-" + std::to_string(diff.resolved_errors.size()) + " fixed ") | color(Color::Green),
-                text("=" + std::to_string(diff.persisting.size()) + " persisting") | color(Color::Yellow)
-            }));
-        }
-
-        Elements right_col;
-        right_col.push_back(text(" SYSTEM") | bold | color(Color::Green));
-        right_col.push_back(separator());
-        right_col.push_back(hbox({text(" CPU: "), gauge(state.cpu / 100.0f) | color(Color::Yellow), text(" " + std::to_string((int)state.cpu) + "%")}));
-        right_col.push_back(hbox({text(" RAM: "), gauge(state.ram / 100.0f) | color(Color::Magenta), text(" " + std::to_string((int)state.ram) + "%")}));
-        right_col.push_back(hbox({text(" NET: "), text(std::to_string((int)(state.net.down * 10.0f) / 10) + "MB/s down") | color(Color::Cyan)}));
-        right_col.push_back(hbox({text(" UP:  "), text(format_duration(state.uptime_secs)) | color(Color::White)}));
-        right_col.push_back(separator());
-        right_col.push_back(text(g_ws_server.is_active() ? " Mobile: Connected" : " Mobile: Waiting") | color(g_ws_server.is_active() ? Color::Green : Color::Yellow));
-
-        Elements left_col;
-        left_col.push_back(hbox({text(" ACTIVE BUILDS (" + std::to_string(state.jobs.size()) + ")") | bold | color(Color::Cyan), filler()}));
-        left_col.push_back(separator());
-        for (auto& e : build_rows) left_col.push_back(e);
+        // 1. Update Global Stats
+        auto now = std::chrono::system_clock::now();
+        auto t = std::chrono::system_clock::to_time_t(now);
+        std::ostringstream ss;
+        ss << std::put_time(std::localtime(&t), "%a %b %d · %H:%M:%S");
         
-        std::vector<gh::WorkflowRun> active_runs;
-        { std::lock_guard<std::mutex> lk(state.gh_poller.mtx); active_runs = state.gh_poller.active_runs; }
-        if (!active_runs.empty() || state.gh_poller.config_loaded) {
-            left_col.push_back(text(" ") | size(HEIGHT, EQUAL, 1));
-            left_col.push_back(hbox({text(" GITHUB ACTIONS (" + std::to_string(active_runs.size()) + ")") | bold | color(Color::Cyan), filler()}));
-            left_col.push_back(separator());
-            if (active_runs.empty()) {
-                left_col.push_back(text("  No active GitHub Actions.") | dim);
-            } else {
-                for (auto& wr : active_runs) {
-                    left_col.push_back(hbox({
-                        text("  [GH] "),
-                        text(wr.repo + ":" + wr.head_branch) | bold | size(WIDTH, EQUAL, 20),
-                        text(wr.name) | dim | size(WIDTH, EQUAL, 16),
-                        text((wr.status == "in_progress" ? "Running" : "Queued")) | color(Color::Yellow) | size(WIDTH, EQUAL, 9)
-                    }) | size(HEIGHT, EQUAL, 1));
-                }
-            }
-        }
+        UI::SystemStats ui_stats;
+        ui_stats.mobile_active = g_ws_server.is_active();
+        ui_stats.cpu_percent = (int)state.cpu;
+        ui_stats.ram_gb = (state.ram / 100.0f) * 16.0f; // Mock total RAM for GB display
+        ui_stats.net_down_kb = state.net.down * 1024.0f;
+        ui_stats.net_up_kb = state.net.up * 1024.0f;
+        ui_stats.error_count = (int)state.all_errors.size();
+        ui_stats.time_str = ss.str();
 
-        for (auto& e : diff_els)  left_col.push_back(e);
-
-        return hbox({
-            vbox(std::move(left_col)) | flex | border,
-            vbox(std::move(right_col)) | size(WIDTH, EQUAL, 38) | border
-        }) | flex;
-    });
-
-    // ═══════════════════════════════════════
-    // TAB 2: Run Command
-    // ═══════════════════════════════════════
-    auto run_view = Renderer(Container::Vertical({dir_input, cmd_input, run_btn}), [&] {
-        return vbox({
-            text(" LAUNCH NEW BUILD") | bold | color(Color::Cyan),
-            separator(),
-            hbox({text("  Directory: ") | size(WIDTH, EQUAL, 14), dir_input->Render() | border}),
-            hbox({text("  Command:   ") | size(WIDTH, EQUAL, 14), cmd_input->Render() | border}),
-            separator(),
-            run_btn->Render() | hcenter,
-            filler(),
-            text("  [Enter] Run  [Tab] Switch fields  [1-5] Change tab") | dim | hcenter
-        }) | flex | border;
-    });
-
-    // ═══════════════════════════════════════
-    // TAB 3: Build Log
-    // ═══════════════════════════════════════
-    auto log_view = Renderer(empty_comp, [&] {
-        std::lock_guard<std::mutex> lk(state.mtx);
-        Elements log_lines;
-        BuildJob* active = nullptr;
-        if (!state.jobs.empty()) active = &state.jobs.front();
-
-        if (!active || active->log_lines.empty()) {
-            log_lines.push_back(text("  No log output. Start a build to see output here.") | dim);
-        } else {
-            int total = (int)active->log_lines.size();
-            int visible = 32;
-            int start = active->auto_scroll
-                ? std::max(0, total - visible)
-                : std::max(0, std::min(active->log_scroll_pos, total - visible));
-            for (int i = start; i < std::min(start + visible, total); i++) {
-                const std::string& ln = active->log_lines[i];
-                bool is_err  = ln.find("error") != std::string::npos || ln.find("Error") != std::string::npos;
-                bool is_warn = ln.find("warning") != std::string::npos;
-                Color c = is_err ? Color::Red : (is_warn ? Color::Yellow : Color::White);
-                log_lines.push_back(text("  " + ln) | color(c));
-            }
-        }
-
-        std::string scroll_hint = (active && !active->auto_scroll)
-            ? "  [S] Resume auto-scroll" : "  [S] Lock scroll / [Arrow] Scroll";
-
-        return vbox({
-            hbox({text(" BUILD LOG") | bold | color(Color::Cyan), filler(), text(scroll_hint) | dim}),
-            separator(),
-            vbox(std::move(log_lines)) | flex
-        }) | flex | border;
-    });
-
-    // ═══════════════════════════════════════
-    // TAB 4: History
-    // ═══════════════════════════════════════
-    auto history_view = Renderer(empty_comp, [&] {
-        std::lock_guard<std::mutex> lk(state.mtx);
-        Elements el;
-        el.push_back(hbox({
-            text("  Project") | bold | size(WIDTH, EQUAL, 18),
-            text("Tool") | bold | size(WIDTH, EQUAL, 9),
-            text("Status") | bold | size(WIDTH, EQUAL, 10),
-            text("Dur") | bold | size(WIDTH, EQUAL, 9),
-            text("Err") | bold | size(WIDTH, EQUAL, 5),
-            text("Time") | bold
-        }) | color(Color::GrayLight));
-        el.push_back(separator());
-
-        if (state.history.empty()) {
-            el.push_back(text("  No history yet.") | dim);
-        } else {
-            int start = std::max(0, history_scroll);
-            int end   = std::min((int)state.history.size(), start + 25);
-            for (int i = start; i < end; i++) {
-                auto& h = state.history[i];
-                bool failed = (h.status == "Failed");
-                int   ec    = (int)h.errors.size();
-                el.push_back(hbox({
-                    text("  " + h.project) | bold | size(WIDTH, EQUAL, 18),
-                    text(h.tool) | dim | size(WIDTH, EQUAL, 9),
-                    text(h.status) | color(failed ? Color::Red : Color::Green) | size(WIDTH, EQUAL, 10),
-                    text(format_duration(h.duration_seconds)) | size(WIDTH, EQUAL, 9),
-                    text(std::to_string(ec)) | color(ec > 0 ? Color::Red : Color::GrayLight) | size(WIDTH, EQUAL, 5),
-                    text(format_timestamp(h.timestamp)) | dim
-                }));
-            }
-        }
-
-        return vbox({
-            hbox({text(" BUILD HISTORY") | bold | color(Color::Cyan), filler(), text("  [Up/Down] Scroll  [C] Copy errors") | dim}),
-            separator(),
-            vbox(std::move(el)) | flex
-        }) | flex | border;
-    });
-
-    // ═══════════════════════════════════════
-    // TAB 5: Errors
-    // ═══════════════════════════════════════
-    auto errors_view = Renderer(empty_comp, [&] {
-        std::lock_guard<std::mutex> lk(state.mtx);
-        Elements el;
-
-        // Diff banner
-        auto& diff = state.last_diff;
-        if (!diff.new_errors.empty() || !diff.resolved_errors.empty()) {
-            el.push_back(hbox({
-                text("  Delta: "),
-                text("+" + std::to_string(diff.new_errors.size()) + " new  ") | color(Color::Red),
-                text("-" + std::to_string(diff.resolved_errors.size()) + " fixed  ") | color(Color::Green),
-                text("=" + std::to_string(diff.persisting.size()) + " same") | color(Color::Yellow)
-            }));
-            el.push_back(separator());
-        }
-
-        if (state.all_errors.empty()) {
-            el.push_back(text("  No errors — clean build!") | color(Color::Green));
-        } else {
-            int start = std::max(0, errors_scroll);
-            int end   = std::min((int)state.all_errors.size(), start + 30);
-            for (int i = start; i < end; i++) {
-                auto& e = state.all_errors[i];
-                std::string loc = e.file;
-                if (e.line > 0) loc += ":" + std::to_string(e.line);
-                if (e.column > 0) loc += ":" + std::to_string(e.column);
-                std::string code_part = e.code.empty() ? "" : " [" + e.code + "]";
-
-                el.push_back(hbox({
-                    text("  " + severity_icon(e.severity)) | color(severity_color(e.severity)),
-                    text(" "),
-                    text(loc.empty() ? "(no location)" : loc) | color(Color::Cyan) | size(WIDTH, EQUAL, 30),
-                    text(e.message + code_part) | color(severity_color(e.severity))
-                }));
-                if (!e.file.empty()) {
-                    el.push_back(text("       vim +" + std::to_string(e.line) + " " + e.file) | dim | color(Color::GrayDark));
-                }
-            }
-        }
-
-        int ec = (int)state.all_errors.size();
-        std::string badge = " ERRORS [" + std::to_string(ec) + "]";
-        return vbox({
-            hbox({
-                text(badge) | bold | color(ec == 0 ? Color::Green : Color::Red),
-                filler(),
-                text("  [Up/Down] Scroll  [C] Copy  [Esc] Dismiss overlay") | dim
-            }),
-            separator(),
-            vbox(std::move(el)) | flex
-        }) | flex | border;
-    });
-
-    // ═══════════════════════════════════════
-    // TAB 6: Plugins
-    // ═══════════════════════════════════════
-    auto plugins_view = Renderer(empty_comp, [&] {
-        std::lock_guard<std::mutex> lk(state.mtx);
-        Elements el;
-        el.push_back(hbox({
-            text("  Plugin Name") | bold | size(WIDTH, EQUAL, 25),
-            text("Status") | bold | size(WIDTH, EQUAL, 10),
-            text("Triggers") | bold | size(WIDTH, EQUAL, 20),
-            text("Last Output") | bold
-        }) | color(Color::GrayLight));
-        el.push_back(separator());
-
-        if (state.plugins.plugins.empty()) {
-            el.push_back(text("  No plugins installed. (Add .lua files to ~/.buildm-on/plugins/)") | dim);
-        } else {
-            int start = std::max(0, plugins_scroll);
-            int end   = std::min((int)state.plugins.plugins.size(), start + 25);
-            for (int i = start; i < end; i++) {
-                auto& p = state.plugins.plugins[i];
-                std::string triggers = p.triggers.empty() ? "all" : "";
-                if (triggers.empty()) {
-                    for (size_t t = 0; t < p.triggers.size(); t++) {
-                        triggers += p.triggers[t] + (t + 1 < p.triggers.size() ? "," : "");
-                    }
-                }
-                Color status_c = p.enabled ? Color::Green : Color::GrayDark;
-                std::string indicator = (i == plugins_scroll) ? "> " : "  ";
-                el.push_back(hbox({
-                    text(indicator + p.name) | color((i == plugins_scroll) ? Color::White : Color::GrayLight) | size(WIDTH, EQUAL, 25),
-                    text(p.enabled ? "Enabled" : "Disabled") | color(status_c) | size(WIDTH, EQUAL, 10),
-                    text(triggers) | dim | size(WIDTH, EQUAL, 20),
-                    text(p.last_status) | size(WIDTH, EQUAL, 35)
-                }));
-                if (!p.description.empty()) {
-                    el.push_back(text("    " + p.description) | dim | color(Color::Cyan));
-                }
-            }
-        }
-
-        return vbox({
-            hbox({text(" PLUGINS") | bold | color(Color::Cyan), filler(), text("  [Up/Down] Select  [(E)nable / (D)isable]  [R] Reload") | dim}),
-            separator(),
-            vbox(std::move(el)) | flex
-        }) | flex | border;
-    });
-
-    // ═══════════════════════════════════════
-    // TAB 7: Visualize
-    // ═══════════════════════════════════════
-    auto visualize_view = Renderer(empty_comp, [&] {
-        std::lock_guard<std::mutex> lk(state.mtx);
-        Elements el;
+        // 2. Prepare Tab Data
+        state.dash_state.stats = ui_stats;
+        state.dash_state.selected_build = -1; // TODO: link with selection
+        state.dash_state.builds.clear();
+        for (auto& j : state.jobs) state.dash_state.builds.push_back(to_ui_build(j));
+        state.dash_state.errors.clear();
+        for (auto& e : state.all_errors) state.dash_state.errors.push_back(to_ui_error(e));
         
-        el.push_back(text("  Build Timeline (Last 5)") | bold | color(Color::Cyan));
-        el.push_back(separator());
-        
-        auto hist = load_history();
-        if (hist.empty()) {
-            el.push_back(text("  No history available for visualization.") | dim);
-        } else {
-            std::sort(hist.begin(), hist.end(), [](auto& a, auto& b) { return a.timestamp > b.timestamp; });
-            int count = std::min(5, (int)hist.size());
-            
-            time_t max_time = hist[0].timestamp;
-            time_t min_time = hist[0].timestamp - hist[0].duration_seconds;
-            for (int i = 1; i < count; i++) {
-                if (hist[i].timestamp > max_time) max_time = hist[i].timestamp;
-                time_t st = hist[i].timestamp - hist[i].duration_seconds;
-                if (st < min_time) min_time = st;
-            }
-            
-            float total_span = std::max(1.0f, (float)(max_time - min_time));
-            
-            for (int i = 0; i < count; i++) {
-                auto& h = hist[i];
-                time_t st = h.timestamp - h.duration_seconds;
-                float start_pct = (st - min_time) / total_span;
-                float dur_pct = h.duration_seconds / total_span;
-                if (dur_pct < 0.02f) dur_pct = 0.02f;
-                
-                int total_chars = 60;
-                int start_spaces = (int)(start_pct * total_chars);
-                int dur_chars = (int)(dur_pct * total_chars);
-                
-                std::string bar = std::string(start_spaces, ' ') + std::string(dur_chars, '#') + " " + format_duration(h.duration_seconds);
-                Color c = (h.status == "Success") ? Color::Green : Color::Red;
-                el.push_back(hbox({
-                    text("  " + h.project) | size(WIDTH, EQUAL, 20),
-                    text(bar) | color(c)
-                }));
-            }
-            el.push_back(text(""));
-            
-            el.push_back(text("  Side-by-Side Comparison (Latest vs Previous)") | bold | color(Color::Cyan));
-            el.push_back(separator());
-            
-            if (count >= 2) {
-                auto& b1 = hist[0];
-                auto& b2 = hist[1];
-                
-                auto col1 = vbox({
-                    text(" " + format_timestamp(b1.timestamp)) | bold,
-                    text(" Project: " + b1.project),
-                    text(" Tool: " + b1.tool),
-                    text(" Status: " + b1.status) | color(b1.status == "Success" ? Color::Green : Color::Red),
-                    text(" Duration: " + format_duration(b1.duration_seconds)),
-                    text(" Errors: " + std::to_string(b1.errors.size()))
-                }) | border;
-                
-                auto col2 = vbox({
-                    text(" " + format_timestamp(b2.timestamp)) | bold,
-                    text(" Project: " + b2.project),
-                    text(" Tool: " + b2.tool),
-                    text(" Status: " + b2.status) | color(b2.status == "Success" ? Color::Green : Color::Red),
-                    text(" Duration: " + format_duration(b2.duration_seconds)),
-                    text(" Errors: " + std::to_string(b2.errors.size()))
-                }) | border;
-                
-                el.push_back(hbox({ col1 | flex, col2 | flex }));
-            } else {
-                el.push_back(text("  Need at least 2 builds for comparison.") | dim);
-            }
-        }
-        
-        return vbox({
-            hbox({text(" VISUALIZE") | bold | color(Color::Magenta), filler()}),
-            separator(),
-            vbox(std::move(el)) | flex
-        }) | flex | border;
-    });
-
-    // ── Tab menu ──────────────────────────────────
-    auto make_tab_entries = [&]() -> std::vector<std::string> {
-        int ec = 0;
-        { std::lock_guard<std::mutex> lk(state.mtx); ec = (int)state.all_errors.size(); }
-        std::string err_label = " ERRORS";
-        if (ec > 0) err_label += " [" + std::to_string(ec) + "]";
-        return {" DASHBOARD ", " RUN ", " LOG ", " HISTORY ", err_label + " ", " PLUGINS ", " VISUALIZE "};
-    };
-    std::vector<std::string> tab_entries = make_tab_entries();
-    auto tab_menu = Menu(&tab_entries, &selected_tab);
-    auto tab_container = Container::Tab({
-        dashboard_view, run_view, log_view, history_view, errors_view, plugins_view, visualize_view
-    }, &selected_tab);
-    auto main_container = Container::Vertical({tab_menu, tab_container});
-
-        // ── Main renderer (with overlay) ───────────────
-    auto renderer = Renderer(main_container, [&] {
-        tab_entries = make_tab_entries();
-
-        std::string gh_badge = "";
-        if (state.gh_poller.config_loaded) {
-            std::lock_guard<std::mutex> lk(state.gh_poller.mtx);
-            int running = 0, queued = 0;
-            for (auto& wr : state.gh_poller.active_runs) {
-                if (wr.status == "in_progress") running++;
-                else if (wr.status == "queued") queued++;
-            }
-            if (running > 0 || queued > 0) {
-                gh_badge = " GH Actions: " + std::to_string(running) + " run, " + std::to_string(queued) + " wait ";
-            } else {
-                gh_badge = " GH Actions: idle ";
+        // Logs for Dashboard
+        state.dash_state.logs.clear();
+        if (!state.jobs.empty()) {
+            auto& active = state.jobs.front();
+            int start = active.auto_scroll ? std::max(0, (int)active.log_lines.size() - 10) : active.log_scroll_pos;
+            for (int i = start; i < (int)active.log_lines.size(); ++i) {
+                UI::LogLine l;
+                l.timestamp = ""; l.prefix = ""; l.body = active.log_lines[i];
+                l.level = UI::LogLevel::Info;
+                state.dash_state.logs.push_back(l);
             }
         }
 
-        Element top_bar = hbox({
-            text(" Buildm-on v1.5 ") | bold | bgcolor(Color::Blue) | color(Color::White),
-            gh_badge.empty() ? text("") : text(gh_badge) | bold | bgcolor(Color::White) | color(Color::Black),
-            filler(),
-            text("WS:") | color(Color::GrayLight),
-            text(g_ws_server.is_active() ? " Live " : " Wait ") | color(g_ws_server.is_active() ? Color::Green : Color::Yellow),
-            text("| CPU:") | color(Color::GrayLight),
-            text(std::to_string((int)state.cpu) + "% ") | color(Color::Yellow),
-            text("RAM:") | color(Color::GrayLight),
-            text(std::to_string((int)state.ram) + "% ") | color(Color::Magenta)
-        });
+        state.dash_state.stat_tiles = {
+            { "Builds Today", std::to_string(state.history.size()), "active session", Theme::Sky },
+            { "Success Rate", "100%", "no failures", Theme::Sage },
+        };
 
-        Element base = vbox({
-            top_bar | border,
-            tab_menu->Render() | hcenter | color(Color::Cyan),
-            tab_container->Render() | flex,
-            text("  q:Quit  1-7:Tabs  S:Scroll  C:Copy-errors  Enter:Confirm  Esc:Dismiss") | dim
-        });
+        // 3. Prepare Launcher Data
+        state.launcher_state.directory = state.launcher_dir_input;
+        state.launcher_state.command = state.launcher_cmd_input;
+        state.launcher_state.running = !state.jobs.empty();
+        state.launcher_state.output_log = state.dash_state.logs;
 
-        // Failure overlay
+        // 4. Render Active Tab
+        Element content;
+        switch (state.active_tab) {
+            case 0: content = UI::DashboardScreen(state.dash_state, state.active_tab); break;
+            case 1: content = UI::LauncherView(state.launcher_state, state.active_tab); break;
+            case 2: { // History
+                Elements elements;
+                elements.push_back(UI::StatusBar(ui_stats));
+                elements.push_back(UI::TabBar(state.active_tab));
+                elements.push_back(Theme::Rule());
+                elements.push_back(text("  History View — Modularization in progress") | color(Theme::TextDim) | flex);
+                elements.push_back(UI::BottomBar({{"q", "quit"}}));
+                content = vbox(std::move(elements));
+                break;
+            }
+            case 3: { // Plugins
+                Elements elements;
+                elements.push_back(UI::StatusBar(ui_stats));
+                elements.push_back(UI::TabBar(state.active_tab));
+                elements.push_back(Theme::Rule());
+                elements.push_back(text("  Plugins View — Modularization in progress") | color(Theme::TextDim) | flex);
+                elements.push_back(UI::BottomBar({{"q", "quit"}}));
+                content = vbox(std::move(elements));
+                break;
+            }
+            default: { // Help
+                Elements elements;
+                elements.push_back(UI::StatusBar(ui_stats));
+                elements.push_back(UI::TabBar(state.active_tab));
+                elements.push_back(Theme::Rule());
+                elements.push_back(text("  Help View — Modularization in progress") | color(Theme::TextDim) | flex);
+                elements.push_back(UI::BottomBar({{"q", "quit"}}));
+                content = vbox(std::move(elements));
+                break;
+            }
+        }
+
+        // 5. Final Assembly with Overlays
         if (state.show_failure_overlay) {
-            std::lock_guard<std::mutex> lk(state.mtx);
-            int ec = (int)state.all_errors.size();
-            std::map<std::string, int> file_freq;
-            for (auto& e : state.all_errors) if (!e.file.empty()) file_freq[e.file]++;
-            std::string top_file = "—";
-            int top_count = 0;
-            for (auto& [ff, cnt] : file_freq) if (cnt > top_count) { top_file = ff; top_count = cnt; }
-            std::string first_loc, first_msg;
-            for (auto& e : state.all_errors) {
-                if (e.severity == ErrorSeverity::Error) {
-                    first_loc = e.file + ":" + std::to_string(e.line);
-                    first_msg = e.message;
-                    break;
-                }
-            }
-            auto overlay = vbox({
-                text("  BUILD FAILED — " + state.last_failed_project) | bold | color(Color::Red),
-                separator(),
-                hbox({text("  Errors:   "), text(std::to_string(ec)) | color(Color::Red)}),
-                hbox({text("  Top file: "), text(top_file) | color(Color::Yellow)}),
-                hbox({text("  Location: "), text(first_loc) | color(Color::Cyan)}),
-                text("  " + first_msg.substr(0, 60)) | color(Color::White),
-                separator(),
-                text("  [C] Copy errors  [5] Errors tab  [Esc] Dismiss") | dim | hcenter
-            }) | border | color(Color::Red) | size(WIDTH, EQUAL, 64);
-            return dbox({base, overlay | hcenter | vcenter});
+            Elements elements;
+            elements.push_back(text(" ✖ Build Failed ") | bold | color(Theme::Rose) | hcenter);
+            elements.push_back(separator());
+            elements.push_back(text("  Errors: " + std::to_string(state.all_errors.size())) | color(Theme::Rose));
+            elements.push_back(text(""));
+            elements.push_back(text("  [Esc] to close") | dim | hcenter);
+            
+            auto overlay = vbox(std::move(elements)) | size(WIDTH, EQUAL, 40) | borderDouble | color(Theme::Rose) | center;
+            return dbox(Elements{ content, overlay });
         }
 
-        // Clipboard copy toast
-        if (state.clipboard_copied) {
-            auto toast = vbox({
-                filler(),
-                hbox({filler(), text("  Copied to clipboard!  ") | bold | bgcolor(Color::Green) | color(Color::Black) | border})
-            });
-            return dbox({base, toast});
-        }
-
-        return base;
+        return content;
     });
 
-    // ── Event handler ─────────────────────────────
+    // ── Global Event Handler ──────────────────────
     auto event_handler = CatchEvent(renderer, [&](Event e) {
-        if (e == Event::Character('q'))   { is_running = false; screen.ExitLoopClosure()(); return true; }
-        if (e == Event::Character('1'))   { selected_tab = 0; return true; }
-        if (e == Event::Character('2'))   { selected_tab = 1; return true; }
-        if (e == Event::Character('3'))   { selected_tab = 2; return true; }
-        if (e == Event::Character('4'))   { selected_tab = 3; return true; }
-        if (e == Event::Character('5'))   { selected_tab = 4; return true; }
-        if (e == Event::Character('6'))   { selected_tab = 5; return true; }
-        if (e == Event::Character('7'))   { selected_tab = 6; return true; }
+        if (e == Event::Character('q')) { is_running = false; screen.ExitLoopClosure()(); return true; }
+        if (e == Event::Character('1')) { state.active_tab = 0; return true; }
+        if (e == Event::Character('2')) { state.active_tab = 1; return true; }
+        if (e == Event::Character('3')) { state.active_tab = 2; return true; }
+        if (e == Event::Character('4')) { state.active_tab = 3; return true; }
+        if (e == Event::Character('5')) { state.active_tab = 4; return true; }
 
-        if (e == Event::Escape) {
-            state.show_failure_overlay = false;
-            state.clipboard_copied     = false;
-            return true;
-        }
+        if (e == Event::Escape) { state.show_failure_overlay = false; return true; }
 
-        // [S] auto-scroll toggle
-        if (e == Event::Character('s') || e == Event::Character('S')) {
-            std::lock_guard<std::mutex> lk(state.mtx);
-            if (!state.jobs.empty()) {
-                auto& j = state.jobs.front();
-                j.auto_scroll = !j.auto_scroll;
-            }
-            return true;
-        }
-
-        // [C] copy errors
-        if (e == Event::Character('c') || e == Event::Character('C')) {
-            std::string text_buf;
-            {
-                std::lock_guard<std::mutex> lk(state.mtx);
-                auto& src = (selected_tab == 3 && !state.history.empty())
-                    ? state.history.front().errors
-                    : state.all_errors;
-                for (auto& err : src) {
-                    text_buf += severity_str(err.severity) + ": ";
-                    if (!err.file.empty()) text_buf += err.file + ":" + std::to_string(err.line) + ": ";
-                    if (!err.code.empty()) text_buf += "[" + err.code + "] ";
-                    text_buf += err.message + "\n";
-                }
-            }
-            if (!text_buf.empty()) {
-                copy_to_clipboard(text_buf);
-                state.clipboard_copied = true;
-                std::thread([&] {
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                    state.clipboard_copied = false;
-                    screen.PostEvent(Event::Custom);
-                }).detach();
-            }
-            return true;
-        }
-
-        // Plugin actions
-        if (selected_tab == 5) { // Plugins tab
-            if (e == Event::Character('r') || e == Event::Character('R')) {
-                state.plugins.load_plugins();
-                return true;
-            }
-            if (e == Event::Character('e') || e == Event::Character('E') ||
-                e == Event::Character('d') || e == Event::Character('D')) {
-                bool enable = (e == Event::Character('e') || e == Event::Character('E'));
-                std::lock_guard<std::mutex> lk(state.mtx);
-                if (!state.plugins.plugins.empty()) {
-                    int idx = plugins_scroll;
-                    if (idx >= 0 && idx < (int)state.plugins.plugins.size()) {
-                        auto name = state.plugins.plugins[idx].name;
-                        if (enable) state.plugins.enable(name);
-                        else state.plugins.disable(name);
-                    }
+        // Dashboard Navigation
+        if (state.active_tab == 0 && !state.all_errors.empty()) {
+            if (e == Event::Character('j')) { state.active_error_idx = (state.active_error_idx + 1) % state.all_errors.size(); return true; }
+            if (e == Event::Character('k')) { state.active_error_idx = (state.active_error_idx + state.all_errors.size() - 1) % state.all_errors.size(); return true; }
+            if (e == Event::Return) {
+                auto& err = state.all_errors[state.active_error_idx];
+                if (!err.file.empty()) {
+                    std::string editor = getenv("EDITOR") ? getenv("EDITOR") : "vim";
+                    std::string cmd = editor + " +" + std::to_string(err.line) + " " + err.file;
+                    screen.ExitLoopClosure()();
+                    system(cmd.c_str());
                 }
                 return true;
             }
-            if (e == Event::ArrowDown) { plugins_scroll = std::min((int)state.plugins.plugins.size() - 1, plugins_scroll + 1); return true; }
-            if (e == Event::ArrowUp)   { plugins_scroll = std::max(0, plugins_scroll - 1); return true; }
         }
 
-        // Scroll arrows
-        if (selected_tab == 4) { // Errors tab
-            if (e == Event::ArrowDown) { errors_scroll++; return true; }
-            if (e == Event::ArrowUp)   { errors_scroll = std::max(0, errors_scroll - 1); return true; }
+        // Launcher Controls
+        if (state.active_tab == 1 && e == Event::Return) {
+            if (state.launcher_cmd_input.empty()) return true;
+            std::string tool = state.launcher_cmd_input.substr(0, state.launcher_cmd_input.find(' '));
+            std::string proj = state.launcher_dir_input.empty() ? "terminal" : fs::path(state.launcher_dir_input).filename().string();
+            std::string final_cmd = state.launcher_cmd_input + " 2>&1";
+            if (!state.launcher_dir_input.empty()) final_cmd = "cd " + state.launcher_dir_input + " && " + final_cmd;
+            run_cmd_logic(final_cmd, tool, proj, state.launcher_dir_input);
+            return true;
         }
-        if (selected_tab == 3) { // History tab
-            if (e == Event::ArrowDown) { history_scroll++; return true; }
-            if (e == Event::ArrowUp)   { history_scroll = std::max(0, history_scroll - 1); return true; }
-        }
-        if (selected_tab == 2) { // Log tab
-            std::lock_guard<std::mutex> lk(state.mtx);
-            if (!state.jobs.empty()) {
-                if (e == Event::ArrowDown) { state.jobs.front().auto_scroll = false; state.jobs.front().log_scroll_pos++; return true; }
-                if (e == Event::ArrowUp)   { state.jobs.front().auto_scroll = false; state.jobs.front().log_scroll_pos = std::max(0, state.jobs.front().log_scroll_pos - 1); return true; }
-            }
-        }
+
         return false;
     });
 

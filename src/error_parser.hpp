@@ -7,6 +7,7 @@
 #include <regex>
 #include <algorithm>
 #include <map>
+#include <fstream>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -25,12 +26,13 @@ enum class ErrorSeverity {
 struct ParsedError {
     std::string file;
     int line = 0;
-    int column = 0;
+    int col = 0;
     std::string code;       // e.g. "E0308", "TS2304"
     std::string message;
     std::string context;    // surrounding source snippet
     ErrorSeverity severity = ErrorSeverity::Error;
     std::string tool;       // "rustc", "gcc", "tsc", etc.
+    bool is_new = false;    // for diffing
 };
 
 inline std::string severity_str(ErrorSeverity s) {
@@ -45,7 +47,7 @@ inline std::string severity_str(ErrorSeverity s) {
 
 inline void to_json(json& j, const ParsedError& e) {
     j = json{
-        {"file", e.file}, {"line", e.line}, {"column", e.column},
+        {"file", e.file}, {"line", e.line}, {"col", e.col},
         {"code", e.code}, {"message", e.message}, {"context", e.context},
         {"severity", severity_str(e.severity)}, {"tool", e.tool}
     };
@@ -54,7 +56,7 @@ inline void to_json(json& j, const ParsedError& e) {
 inline void from_json(const json& j, ParsedError& e) {
     j.at("file").get_to(e.file);
     j.at("line").get_to(e.line);
-    j.at("column").get_to(e.column);
+    j.at("col").get_to(e.col);
     j.at("code").get_to(e.code);
     j.at("message").get_to(e.message);
     j.at("context").get_to(e.context);
@@ -64,6 +66,7 @@ inline void from_json(const json& j, ParsedError& e) {
     else if (sev == "note") e.severity = ErrorSeverity::Note;
     else e.severity = ErrorSeverity::Error;
     j.at("tool").get_to(e.tool);
+    e.is_new = j.value("is_new", false);
 }
 
 // ─────────────────────────────────────────────
@@ -73,7 +76,7 @@ inline void from_json(const json& j, ParsedError& e) {
 class ErrorParser {
 public:
     // Parse a block of build output lines
-    std::vector<ParsedError> parse(const std::vector<std::string>& lines, const std::string& tool_hint = "") {
+    std::vector<ParsedError> parse(const std::vector<std::string>& lines, const std::string& project_dir = "", const std::string& tool_hint = "") {
         std::vector<ParsedError> errors;
 
         for (size_t i = 0; i < lines.size(); i++) {
@@ -101,7 +104,7 @@ public:
                         if (std::regex_search(lines[k], lm, rust_loc)) {
                             err.file   = lm[1];
                             err.line   = std::stoi(lm[2]);
-                            err.column = std::stoi(lm[3]);
+                            err.col = std::stoi(lm[3]);
                             break;
                         }
                     }
@@ -125,7 +128,7 @@ public:
                             auto& span = msg["spans"][0];
                             err.file   = span.value("file_name", "");
                             err.line   = span.value("line_start", 0);
-                            err.column = span.value("column_start", 0);
+                            err.col = span.value("col_start", 0);
                         }
                         found = true;
                     }
@@ -142,7 +145,7 @@ public:
                 if (std::regex_match(line, m, gcc_re)) {
                     err.file    = m[1];
                     err.line    = std::stoi(m[2]);
-                    err.column  = std::stoi(m[3]);
+                    err.col  = std::stoi(m[3]);
                     err.severity = sev_from_str(m[4]);
                     err.message = m[5];
                     err.tool    = tool_hint.empty() ? "gcc" : tool_hint;
@@ -160,7 +163,7 @@ public:
                 if (std::regex_match(line, m, ts_re)) {
                     err.file    = m[1];
                     err.line    = std::stoi(m[2]);
-                    err.column  = std::stoi(m[3]);
+                    err.col  = std::stoi(m[3]);
                     err.severity = sev_from_str(m[4]);
                     err.code    = m[5];
                     err.message = m[6];
@@ -179,7 +182,7 @@ public:
                 std::smatch m;
                 if (std::regex_match(line, m, eslint_re)) {
                     err.line    = std::stoi(m[1]);
-                    err.column  = std::stoi(m[2]);
+                    err.col  = std::stoi(m[2]);
                     err.severity = sev_from_str(m[3]);
                     err.message = m[4];
                     err.code    = m[5]; // rule name
@@ -206,7 +209,7 @@ public:
                     err.severity = sev_from_str(m[1]);
                     err.file    = m[2];
                     err.line    = std::stoi(m[3]);
-                    err.column  = std::stoi(m[4]);
+                    err.col  = std::stoi(m[4]);
                     err.tool    = "webpack";
                     // Attempt to grab message from next lines
                     if (i + 1 < lines.size()) {
@@ -226,7 +229,7 @@ public:
                 if (std::regex_match(line, m, node_stack_re)) {
                     err.file    = m[1];
                     err.line    = std::stoi(m[2]);
-                    err.column  = std::stoi(m[3]);
+                    err.col  = std::stoi(m[3]);
                     err.severity = ErrorSeverity::Error;
                     err.tool    = "node";
                     for (int k = (int)i - 1; k >= 0 && i - k < 5; k--) {
@@ -251,7 +254,7 @@ public:
                     err.severity = sev_from_str(m[1]);
                     err.file    = m[2];
                     err.line    = std::stoi(m[3]);
-                    err.column  = std::stoi(m[4]);
+                    err.col  = std::stoi(m[4]);
                     err.message = m[5];
                     err.tool    = "bazel";
                     found = true;
@@ -259,11 +262,41 @@ public:
             }
 
             if (found && !err.message.empty()) {
+                if (!err.file.empty() && !project_dir.empty()) {
+                    err.context = extract_context(project_dir, err.file, err.line);
+                }
                 errors.push_back(std::move(err));
             }
         }
 
         return errors;
+    }
+
+    static std::string extract_context(const std::string& base_dir, const std::string& rel_file, int line, int window = 2) {
+        if (line <= 0) return "";
+        std::string full_path = rel_file;
+        if (!rel_file.empty() && rel_file[0] != '/' && !base_dir.empty()) {
+            full_path = base_dir + "/" + rel_file;
+        }
+
+        std::ifstream f(full_path);
+        if (!f.is_open()) return "";
+
+        std::string result;
+        std::string current;
+        int current_line = 0;
+        int start = std::max(1, line - window);
+        int end = line + window;
+
+        while (std::getline(f, current)) {
+            current_line++;
+            if (current_line >= start && current_line <= end) {
+                if (current_line == line) result += ">> " + current + "\n";
+                else                     result += "   " + current + "\n";
+            }
+            if (current_line > end) break;
+        }
+        return result;
     }
 
 private:
