@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include "ws_server.hpp"
 #include "error_parser.hpp"
+#include "plugin_manager.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -403,6 +404,7 @@ struct AppState {
     Config cfg;
     bool clipboard_copied = false;
     std::string copy_feedback;
+    PluginManager plugins;
 };
 
 // ─────────────────────────────────────────────
@@ -426,6 +428,8 @@ int main(int argc, char** argv) {
     state.history = load_history();
 
     ErrorParser parser;
+    PluginManager::ensure_builtin_plugins();
+    state.plugins.load_plugins();
     g_ws_server.start(8765);
     g_discovery.start(8766, "BUILDM-ON_DISCOVERY");
 
@@ -444,6 +448,11 @@ int main(int argc, char** argv) {
                 b.auto_scroll = true;
                 state.jobs.push_back(b);
             }
+            // Fire plugin hook
+            PluginBuildCtx pctx;
+            pctx.command = cmd; pctx.project = proj; pctx.tool = tool;
+            pctx.status = "started";
+            state.plugins.fire("build_start", pctx);
 
             std::vector<std::string> output_lines;
             char buf[1024];
@@ -493,6 +502,12 @@ int main(int argc, char** argv) {
             if (state.cfg.notifications) send_notification(proj, success ? "Build Finished" : "Build FAILED");
             play_sound(state.cfg, success);
             broadcast_update(state.jobs, state.cpu, state.ram);
+            // Fire plugin hook
+            PluginBuildCtx pctx_end;
+            pctx_end.command = cmd; pctx_end.project = proj; pctx_end.tool = tool;
+            pctx_end.status = success ? "finished" : "failed";
+            pctx_end.errors = final_errors;
+            state.plugins.fire("build_end", pctx_end);
         }).detach();
     };
 
@@ -526,6 +541,7 @@ int main(int argc, char** argv) {
     int selected_tab = 0;
     int errors_scroll = 0;
     int history_scroll = 0;
+    int plugins_scroll = 0;
 
     std::thread([&] {
         while (is_running) {
@@ -783,18 +799,66 @@ int main(int argc, char** argv) {
         }) | flex | border;
     });
 
+    // ═══════════════════════════════════════
+    // TAB 6: Plugins
+    // ═══════════════════════════════════════
+    auto plugins_view = Renderer(empty_comp, [&] {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        Elements el;
+        el.push_back(hbox({
+            text("  Plugin Name") | bold | size(WIDTH, EQUAL, 25),
+            text("Status") | bold | size(WIDTH, EQUAL, 10),
+            text("Triggers") | bold | size(WIDTH, EQUAL, 20),
+            text("Last Output") | bold
+        }) | color(Color::GrayLight));
+        el.push_back(separator());
+
+        if (state.plugins.plugins.empty()) {
+            el.push_back(text("  No plugins installed. (Add .lua files to ~/.buildm-on/plugins/)") | dim);
+        } else {
+            int start = std::max(0, plugins_scroll);
+            int end   = std::min((int)state.plugins.plugins.size(), start + 25);
+            for (int i = start; i < end; i++) {
+                auto& p = state.plugins.plugins[i];
+                std::string triggers = p.triggers.empty() ? "all" : "";
+                if (triggers.empty()) {
+                    for (size_t t = 0; t < p.triggers.size(); t++) {
+                        triggers += p.triggers[t] + (t + 1 < p.triggers.size() ? "," : "");
+                    }
+                }
+                Color status_c = p.enabled ? Color::Green : Color::GrayDark;
+                std::string indicator = (i == plugins_scroll) ? "> " : "  ";
+                el.push_back(hbox({
+                    text(indicator + p.name) | color((i == plugins_scroll) ? Color::White : Color::GrayLight) | size(WIDTH, EQUAL, 25),
+                    text(p.enabled ? "Enabled" : "Disabled") | color(status_c) | size(WIDTH, EQUAL, 10),
+                    text(triggers) | dim | size(WIDTH, EQUAL, 20),
+                    text(p.last_status) | size(WIDTH, EQUAL, 35)
+                }));
+                if (!p.description.empty()) {
+                    el.push_back(text("    " + p.description) | dim | color(Color::Cyan));
+                }
+            }
+        }
+
+        return vbox({
+            hbox({text(" PLUGINS") | bold | color(Color::Cyan), filler(), text("  [Up/Down] Select  [(E)nable / (D)isable]  [R] Reload") | dim}),
+            separator(),
+            vbox(std::move(el)) | flex
+        }) | flex | border;
+    });
+
     // ── Tab menu ──────────────────────────────────
     auto make_tab_entries = [&]() -> std::vector<std::string> {
         int ec = 0;
         { std::lock_guard<std::mutex> lk(state.mtx); ec = (int)state.all_errors.size(); }
         std::string err_label = " ERRORS";
         if (ec > 0) err_label += " [" + std::to_string(ec) + "]";
-        return {" DASHBOARD ", " RUN ", " LOG ", " HISTORY ", err_label + " "};
+        return {" DASHBOARD ", " RUN ", " LOG ", " HISTORY ", err_label + " ", " PLUGINS "};
     };
     std::vector<std::string> tab_entries = make_tab_entries();
     auto tab_menu = Menu(&tab_entries, &selected_tab);
     auto tab_container = Container::Tab({
-        dashboard_view, run_view, log_view, history_view, errors_view
+        dashboard_view, run_view, log_view, history_view, errors_view, plugins_view
     }, &selected_tab);
     auto main_container = Container::Vertical({tab_menu, tab_container});
 
@@ -815,7 +879,7 @@ int main(int argc, char** argv) {
             }) | border,
             tab_menu->Render() | hcenter | color(Color::Cyan),
             tab_container->Render() | flex,
-            text("  q:Quit  1-5:Tabs  S:Scroll  C:Copy-errors  Enter:Confirm  Esc:Dismiss") | dim
+            text("  q:Quit  1-6:Tabs  S:Scroll  C:Copy-errors  Enter:Confirm  Esc:Dismiss") | dim
         });
 
         // Failure overlay
@@ -868,6 +932,7 @@ int main(int argc, char** argv) {
         if (e == Event::Character('3'))   { selected_tab = 2; return true; }
         if (e == Event::Character('4'))   { selected_tab = 3; return true; }
         if (e == Event::Character('5'))   { selected_tab = 4; return true; }
+        if (e == Event::Character('6'))   { selected_tab = 5; return true; }
 
         if (e == Event::Escape) {
             state.show_failure_overlay = false;
@@ -910,6 +975,30 @@ int main(int argc, char** argv) {
                 }).detach();
             }
             return true;
+        }
+
+        // Plugin actions
+        if (selected_tab == 5) { // Plugins tab
+            if (e == Event::Character('r') || e == Event::Character('R')) {
+                state.plugins.load_plugins();
+                return true;
+            }
+            if (e == Event::Character('e') || e == Event::Character('E') ||
+                e == Event::Character('d') || e == Event::Character('D')) {
+                bool enable = (e == Event::Character('e') || e == Event::Character('E'));
+                std::lock_guard<std::mutex> lk(state.mtx);
+                if (!state.plugins.plugins.empty()) {
+                    int idx = plugins_scroll;
+                    if (idx >= 0 && idx < (int)state.plugins.plugins.size()) {
+                        auto name = state.plugins.plugins[idx].name;
+                        if (enable) state.plugins.enable(name);
+                        else state.plugins.disable(name);
+                    }
+                }
+                return true;
+            }
+            if (e == Event::ArrowDown) { plugins_scroll = std::min((int)state.plugins.plugins.size() - 1, plugins_scroll + 1); return true; }
+            if (e == Event::ArrowUp)   { plugins_scroll = std::max(0, plugins_scroll - 1); return true; }
         }
 
         // Scroll arrows
