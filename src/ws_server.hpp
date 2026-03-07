@@ -37,7 +37,6 @@
 #include <cstdint>
 
 // ---- SHA-1 (for WebSocket handshake) --------------------------------
-// RFC 3174 implementation — no OpenSSL needed
 namespace ws_sha1 {
     static uint32_t rotl(uint32_t v, int n) { return (v << n) | (v >> (32 - n)); }
     static std::string compute(const std::string& msg) {
@@ -66,9 +65,7 @@ namespace ws_sha1 {
             h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e;
         }
         char buf[41];
-        std::snprintf(buf, sizeof(buf), "%08x%08x%08x%08x%08x",
-                      h[0],h[1],h[2],h[3],h[4]);
-        // Convert hex string to raw bytes
+        std::snprintf(buf, sizeof(buf), "%08x%08x%08x%08x%08x", h[0],h[1],h[2],h[3],h[4]);
         std::string raw;
         for (int i = 0; i < 40; i += 2) {
             uint8_t byte = (uint8_t)std::stoi(std::string(buf+i, 2), nullptr, 16);
@@ -76,7 +73,7 @@ namespace ws_sha1 {
         }
         return raw;
     }
-}  // namespace ws_sha1
+}
 
 // ---- Base64 encode -----------------------------------------------
 namespace ws_b64 {
@@ -92,22 +89,18 @@ namespace ws_b64 {
         while (out.size()%4) out += '=';
         return out;
     }
-}  // namespace ws_b64
+}
 
 // ---- WebSocket connection ----------------------------------------
 struct WsConn {
     sock_t fd;
     std::mutex send_mutex;
-
     WsConn(sock_t f) : fd(f) {}
     ~WsConn() { sock_close(fd); }
-
-    // Send a WebSocket text frame (opcode=0x01)
-    // Max payload: 125 bytes for single-byte length, up to 65535 for 2-byte, unlimited for 8-byte
     bool send_text(const std::string& payload) {
         std::lock_guard<std::mutex> lk(send_mutex);
         std::vector<uint8_t> frame;
-        frame.push_back(0x81); // FIN + opcode text
+        frame.push_back(0x81);
         size_t len = payload.size();
         if (len <= 125) {
             frame.push_back((uint8_t)len);
@@ -123,7 +116,7 @@ struct WsConn {
 #ifdef _WIN32
         return send(fd, (const char*)frame.data(), (int)frame.size(), 0) >= 0;
 #else
-        return ::send(fd, frame.data(), frame.size(), MSG_NOSIGNAL) >= 0;
+        return ::send(fd, (const char*)frame.data(), frame.size(), MSG_NOSIGNAL) >= 0;
 #endif
     }
 };
@@ -131,8 +124,6 @@ struct WsConn {
 // ---- Minimal WebSocket Server ------------------------------------
 class WsServer {
 public:
-    using OnClientFn = std::function<void(std::shared_ptr<WsConn>)>;
-
     std::mutex clients_mutex;
     std::set<std::shared_ptr<WsConn>> clients;
 
@@ -143,12 +134,10 @@ public:
 #endif
     }
 
-    // Start accepting in a background thread on given port
     void start(int port) {
         std::thread([this, port]() { accept_loop(port); }).detach();
     }
 
-    // Broadcast text to all connected clients
     void broadcast(const std::string& text) {
         std::set<std::shared_ptr<WsConn>> snapshot;
         {
@@ -163,6 +152,11 @@ public:
             std::lock_guard<std::mutex> lk(clients_mutex);
             for (auto& c : dead) clients.erase(c);
         }
+    }
+
+    bool is_active() {
+        std::lock_guard<std::mutex> lk(clients_mutex);
+        return !clients.empty();
     }
 
 private:
@@ -199,14 +193,10 @@ private:
 #endif
         if (n <= 0) return false;
         std::string req(buf, n);
-
         std::string ws_key = header_value(req, "Sec-WebSocket-Key");
         if (ws_key.empty()) return false;
-
-        // RFC 6455 magic GUID
         std::string accept_raw = ws_sha1::compute(ws_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
         std::string accept_b64 = ws_b64::encode(accept_raw);
-
         std::string response =
             "HTTP/1.1 101 Switching Protocols\r\n"
             "Upgrade: websocket\r\n"
@@ -222,7 +212,6 @@ private:
     void accept_loop(int port) {
         sock_t server_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (server_fd == SOCK_INVALID) return;
-
         int opt = 1;
 #ifdef _WIN32
         setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
@@ -233,14 +222,11 @@ private:
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons((uint16_t)port);
-
         if (bind(server_fd, (sockaddr*)&addr, sizeof(addr)) < 0) { sock_close(server_fd); return; }
         if (listen(server_fd, 10) < 0) { sock_close(server_fd); return; }
-
         while (true) {
             sock_t client_fd = accept(server_fd, nullptr, nullptr);
             if (client_fd == SOCK_INVALID) continue;
-
             std::thread([this, client_fd]() {
                 if (!do_handshake(client_fd)) { sock_close(client_fd); return; }
                 auto conn = std::make_shared<WsConn>(client_fd);
@@ -248,7 +234,6 @@ private:
                     std::lock_guard<std::mutex> lk(clients_mutex);
                     clients.insert(conn);
                 }
-                // Read loop — keep alive, remove on disconnect
                 char buf[256];
                 while (true) {
 #ifdef _WIN32
@@ -274,24 +259,20 @@ public:
         WSAStartup(MAKEWORD(2,2), &wsa);
 #endif
     }
-
     void start(int port, const std::string& message = "BUILDMON_DISCOVERY") {
         std::thread([this, port, message]() {
             sock_t fd = socket(AF_INET, SOCK_DGRAM, 0);
             if (fd == SOCK_INVALID) return;
-
-            int broadcast = 1;
+            int b = 1;
 #ifdef _WIN32
-            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const char*)&broadcast, sizeof(broadcast));
+            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (const char*)&b, sizeof(b));
 #else
-            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &b, sizeof(b));
 #endif
-
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
             addr.sin_port = htons((uint16_t)port);
             addr.sin_addr.s_addr = INADDR_BROADCAST;
-
             while (true) {
 #ifdef _WIN32
                 sendto(fd, message.c_str(), (int)message.size(), 0, (sockaddr*)&addr, sizeof(addr));
