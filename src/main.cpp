@@ -545,11 +545,88 @@ int main(int argc, char** argv) {
     }).detach();
 
     // ── Input components ──────────────────────────
-    auto dir_input = Input(&state.launcher_dir_input, "Directory (e.g. ~/my-app)");
-    auto cmd_input = Input(&state.launcher_cmd_input, "Command (e.g. cargo build)");
+    InputOption dir_opt;
+    dir_opt.cursor_position = 0;
+    dir_opt.placeholder = "directory (e.g. ~/my-app)";
+    auto dir_input = Input(&state.launcher_dir_input, dir_opt);
+
+    InputOption cmd_opt;
+    cmd_opt.cursor_position = 0;
+    cmd_opt.placeholder = "Command (e.g. cargo build)";
+    auto cmd_input = Input(&state.launcher_cmd_input, cmd_opt);
+
+    auto input_container = Container::Vertical({dir_input, cmd_input});
+    
+    // Autocomplete logic
+    auto do_autocomplete = [&](std::string& current, bool is_dir) {
+        if (is_dir) {
+            namespace fs = std::filesystem;
+            try {
+                auto path = fs::path(current);
+                std::string search_dir = ".";
+                std::string prefix = current;
+
+                if (!current.empty()) {
+                    if (fs::is_directory(path) && current.back() == fs::path::preferred_separator) {
+                        search_dir = current;
+                        prefix = "";
+                    } else if (path.has_parent_path()) {
+                        search_dir = path.parent_path().string();
+                        prefix = path.filename().string();
+                    } else {
+                        prefix = current;
+                    }
+                }
+
+                for (const auto& entry : fs::directory_iterator(search_dir)) {
+                    if (entry.is_directory()) {
+                        std::string name = entry.path().filename().string();
+                        if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0) {
+                            std::string result;
+                            if (search_dir == ".") result = name;
+                            else result = (fs::path(search_dir) / name).string();
+                            current = result + "/";
+                            return;
+                        }
+                    }
+                }
+            } catch (...) {}
+        } else {
+            // Command autocomplete from quick launch
+            for (const auto& cmd : UI::kQuickLaunch) {
+                if (cmd.size() >= current.size() && cmd.compare(0, current.size(), current) == 0) {
+                    current = cmd;
+                    return;
+                }
+            }
+        }
+    };
+
+    // Intercept Tab to perform autocomplete
+    auto launcher_inputs = CatchEvent(input_container, [&](Event event) {
+        if (event == Event::Tab) {
+            if (dir_input->Focused()) do_autocomplete(state.launcher_dir_input, true);
+            else if (cmd_input->Focused()) do_autocomplete(state.launcher_cmd_input, false);
+            return true;
+        }
+        if (event == Event::TabReverse) {
+            return true; // Block shift-tab too
+        }
+        // Ctrl+N (Next field)
+        if (event == Event::Character((char)14)) { // 14 = Ctrl+N
+            input_container->SetActiveChild(cmd_input);
+            return true;
+        }
+        // Ctrl+P (Prev field)
+        if (event == Event::Character((char)16)) { // 16 = Ctrl+P
+            input_container->SetActiveChild(dir_input);
+            return true;
+        }
+        return false;
+    });
 
     // ── Renderer: assembling from modular parts ──
-    auto renderer = Renderer(Container::Vertical({dir_input, cmd_input}), [&]() -> Element {
+    auto renderer = Renderer(launcher_inputs, [&]() -> Element {
         std::lock_guard<std::mutex> lk(state.mtx);
 
         // 1. Update Global Stats
@@ -588,22 +665,39 @@ int main(int argc, char** argv) {
             }
         }
 
+        state.dash_state.flame_tool = "cargo";
         state.dash_state.stat_tiles = {
-            { "Builds Today", std::to_string(state.history.size()), "active session", Theme::Sky },
-            { "Success Rate", "100%", "no failures", Theme::Sage },
+            { "Builds Today",  std::to_string(state.history.size()), "active session", Theme::Sky },
+            { "Success Rate",  "100%",                               "no failures",    Theme::Sage },
+            { "Avg Duration",  state.history.empty() ? "—" : [&]{
+                int total = 0;
+                for (auto& h : state.history) total += h.duration_seconds;
+                return std::to_string(total / (int)state.history.size()) + "s";
+              }(), "last 50 builds", Theme::Lavender },
         };
 
         // 3. Prepare Launcher Data
-        state.launcher_state.directory = state.launcher_dir_input;
-        state.launcher_state.command = state.launcher_cmd_input;
-        state.launcher_state.running = !state.jobs.empty();
-        state.launcher_state.output_log = state.dash_state.logs;
+        state.launcher_state.directory   = state.launcher_dir_input;
+        state.launcher_state.command     = state.launcher_cmd_input;
+        state.launcher_state.running     = !state.jobs.empty();
+        state.launcher_state.output_log  = state.dash_state.logs;
+
+        // Track which field is focused for styled borders
+        state.launcher_state.dir_focused = dir_input->Focused();
+        state.launcher_state.cmd_focused = cmd_input->Focused();
+        state.launcher_state.quick_focused = -1; // TODO: implement quick launch selection logic if needed
 
         // 4. Render Active Tab
         Element content;
         switch (state.active_tab) {
             case 0: content = UI::DashboardScreen(state.dash_state, state.active_tab); break;
-            case 1: content = UI::LauncherView(state.launcher_state, state.active_tab); break;
+            case 1: content = UI::LauncherView(
+                state.launcher_state,
+                state.active_tab,
+                ui_stats,
+                dir_input->Render(),
+                cmd_input->Render()
+            ); break;
             case 2: { // History
                 Elements elements;
                 elements.push_back(UI::StatusBar(ui_stats));

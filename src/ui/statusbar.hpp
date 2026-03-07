@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/component/component.hpp>
 #include "theme.hpp"
@@ -29,6 +31,7 @@ struct SystemStats {
     std::string time_str;        // e.g. "Sat Mar 07 · 14:22:09"
 };
 
+// Status bar badge — borderRounded pill with matching text+border color
 inline Element StatusBadge(const std::string& label, Theme::Color c) {
     return hbox(Elements{
         text(" "),
@@ -41,7 +44,7 @@ inline Element StatusBar(const SystemStats& stats) {
     // Left side badges
     Elements left;
 
-    // Mobile badge — pulses via render tick from caller
+    // Mobile badge
     if (stats.mobile_active) {
         left.push_back(StatusBadge("● Mobile: Active", Theme::Sky));
     } else {
@@ -50,7 +53,7 @@ inline Element StatusBar(const SystemStats& stats) {
     left.push_back(text("  "));
     left.push_back(StatusBadge("CPU " + std::to_string(stats.cpu_percent) + "%", Theme::Sage));
     left.push_back(text(" "));
-    left.push_back(StatusBadge("RAM " + [&]{
+    left.push_back(StatusBadge([&]{
         std::ostringstream ss; ss << std::fixed << std::setprecision(1) << stats.ram_gb << " GB";
         return ss.str();
     }(), Theme::Lavender));
@@ -68,7 +71,7 @@ inline Element StatusBar(const SystemStats& stats) {
     right.push_back(text("  "));
     if (stats.error_count > 0) {
         right.push_back(StatusBadge(
-            "⚡ " + std::to_string(stats.error_count) + " error" + (stats.error_count > 1 ? "s" : ""),
+            "⚡ " + std::to_string(stats.error_count) + " errors",
             Theme::Rose
         ));
     }
@@ -77,12 +80,13 @@ inline Element StatusBar(const SystemStats& stats) {
         hbox(left),
         filler(),
         hbox(right),
-    }) | bgcolor(Theme::BG2) | color(Theme::Text) | size(HEIGHT, EQUAL, 1);
+    }) | bgcolor(Theme::BG2) | color(Theme::Text) | size(HEIGHT, EQUAL, 3) | center;
 }
 
 // ─────────────────────────────────────────────────────
 //  TAB BAR
-//  Active tab glows with Sky color + underline effect
+//  Active tab: Sky color + borderRounded
+//  Inactive:   TextSub color, no border
 // ─────────────────────────────────────────────────────
 struct TabDef {
     std::string icon;
@@ -110,15 +114,14 @@ inline Element TabBar(int active_tab) {
             text(" "),
             text(t.icon + " ")   | color(is_active ? Theme::Sky : Theme::TextSub),
             text(t.label)        | color(is_active ? Theme::Sky : Theme::TextSub)
-                                 | (is_active ? bold : nothing),
+                                 | bold,
             text(" "),
             text(t.key)          | color(Theme::TextDim),
             text(" "),
         });
 
         if (is_active) {
-            // Active: bordered top + sky color, no bottom border → merges with content
-            tabs.push_back(label_el | borderStyled(ROUNDED) | color(Theme::Sky));
+            tabs.push_back(label_el | borderRounded | color(Theme::Sky));
         } else {
             tabs.push_back(label_el | color(Theme::TextSub));
         }
@@ -131,9 +134,10 @@ inline Element TabBar(int active_tab) {
 // ─────────────────────────────────────────────────────
 //  BOTTOM HINT BAR
 //  Shows keybinds contextually per tab
+//  version string right-aligned in TextDim
 // ─────────────────────────────────────────────────────
 inline Element BottomBar(const std::vector<std::pair<std::string,std::string>>& hints,
-                         const std::string& version = "buildm-on v2.0.0 · aurora") {
+                         const std::string& version = "buildm-on v2.0.0 · linux · aurora") {
     Elements elems;
     elems.push_back(text(" "));
     for (const auto& [key, desc] : hints) {

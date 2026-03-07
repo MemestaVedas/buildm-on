@@ -29,47 +29,49 @@ struct DashboardState {
     std::vector<StatTile>    stat_tiles;
     int                      selected_build = -1;
     float                    flame_total_s  = 0.f;
+    std::string              flame_tool     = "cargo";
 };
 
 // ─────────────────────────────────────────────────────
 //  Render the Dashboard tab content (no chrome)
 //
-//  Layout:
+//  Layout (two-column hbox):
 //
-//  ┌──────────────────┬──────────────────────────────┐
-//  │  Active Builds   │  Flamechart                  │
-//  │                  ├──────────────────────────────┤
-//  │                  │  Log Output                  │
-//  ├──────────────────┼──────────────────────────────┤
-//  │  Error Analysis  │  [Stat] [Stat] [Stat]        │
-//  └──────────────────┴──────────────────────────────╯
+//  ┌──────────────────────┬────────────────────────────┐
+//  │  Active Builds  (45) │  Flamechart           (flex)│
+//  │                      ├────────────────────────────┤
+//  │                      │  Log Output           (flex)│
+//  ├──────────────────────┼────────────────────────────┤
+//  │  Error Analysis (45) │  Stat  Stat  Stat          │
+//  └──────────────────────┴────────────────────────────╯
 // ─────────────────────────────────────────────────────
 inline Element DashboardView(const DashboardState& s) {
-    // Left column
+    // Left column: fixed 45 chars
     Elements left_el;
     left_el.push_back(ActiveBuildsPanel(s.builds, s.selected_build) | flex);
     left_el.push_back(emptyElement() | size(HEIGHT, EQUAL, 1));
     left_el.push_back(ErrorPanel(s.errors) | flex);
-    auto left_col = vbox(std::move(left_el)) | flex;
+    auto left_col = vbox(std::move(left_el)) | size(WIDTH, EQUAL, 45);
 
-    // Right column
+    // Right column: flex
     Elements right_el;
-    right_el.push_back(FlamechartPanel(s.flame, "cargo", s.flame_total_s) | flex);
+    right_el.push_back(FlamechartPanel(s.flame, s.flame_tool, s.flame_total_s) | flex);
     right_el.push_back(emptyElement() | size(HEIGHT, EQUAL, 1));
     right_el.push_back(LogPanel(s.logs) | flex);
     right_el.push_back(emptyElement() | size(HEIGHT, EQUAL, 1));
     right_el.push_back(StatRow(s.stat_tiles));
     auto right_col = vbox(std::move(right_el)) | flex;
 
-    Elements main_el;
-    main_el.push_back(left_col | size(WIDTH, EQUAL, 45));
-    main_el.push_back(text(" "));
-    main_el.push_back(right_col | flex);
-    return hbox(std::move(main_el)) | flex;
+    return hbox(Elements{
+        left_col,
+        text(" "),
+        right_col,
+    }) | flex;
 }
 
 // ─────────────────────────────────────────────────────
 //  Full Dashboard screen (chrome + content)
+//  StatusBar / TabBar / Rule / DashboardView / BottomBar
 // ─────────────────────────────────────────────────────
 inline Element DashboardScreen(const DashboardState& s, int active_tab) {
     static const std::vector<std::pair<std::string,std::string>> kHints = {
@@ -77,13 +79,13 @@ inline Element DashboardScreen(const DashboardState& s, int active_tab) {
         {"f", "flamechart"}, {"k", "kill build"}, {"q", "quit"},
     };
 
-    Elements screen_el;
-    screen_el.push_back(StatusBar(s.stats));
-    screen_el.push_back(TabBar(active_tab));
-    screen_el.push_back(Theme::Rule());
-    screen_el.push_back(DashboardView(s) | flex | bgcolor(Theme::BG));
-    screen_el.push_back(BottomBar(kHints));
-    return vbox(std::move(screen_el)) | bgcolor(Theme::BG);
+    return vbox(Elements{
+        StatusBar(s.stats),
+        TabBar(active_tab),
+        Theme::Rule(),
+        DashboardView(s) | flex | bgcolor(Theme::BG),
+        BottomBar(kHints),
+    }) | bgcolor(Theme::BG);
 }
 
 } // namespace UI

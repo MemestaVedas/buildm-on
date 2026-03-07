@@ -69,48 +69,51 @@ inline Theme::Color AccentColor(BuildStatus st) {
 // ─────────────────────────────────────────────────────
 //  Single build card
 //
-//  ┃  🦀 cargo build           ● RUNNING
-//     ~/projects/myapp · release mode
-//     ████████████░░░░░░░  63%
-//     47 crates                    0:42
+//  ╭──────────────────────────────────────────────────╮
+//  ┃  🦀 cargo build                    ╭─ RUNNING ──╮
+//     ~/projects/myapp · release mode   ╰────────────╯
+//     ████████████░░░░░░  63%
+//     47 crates                              0:42
+//  ╰──────────────────────────────────────────────────╯
 // ─────────────────────────────────────────────────────
 inline Element BuildCard(const BuildEntry& b, bool selected = false) {
     auto [status_label, accent] = StatusLabel(b.status);
     auto strip_color = AccentColor(b.status);
 
-    // ── Top row: tool name + status badge
+    // ── Top row: tool icon + name + filler + status badge
+    // Status badge: text(" ● RUNNING ") | color(c) | bold | borderRounded | color(c)
+    auto status_badge = hbox(Theme::make_elements(
+        text(" " + status_label + " ") | color(accent) | bold
+    )) | borderRounded | color(accent);
+
     auto top_row = hbox(Theme::make_elements(
         text(b.icon + " ")  | color(accent) | bold,
-        text(b.tool + " ")  | color(Theme::Text) | bold,
+        text(b.tool)        | color(Theme::Text) | bold,
         filler(),
-        hbox(Theme::make_elements(
-            text(" " + status_label + " ") | color(accent) | bold
-        ))  | color(accent),
+        status_badge,
         text(" ")
     ));
 
-    // ── Command + dir row
+    // ── Command + directory row
     auto cmd_row = hbox(Theme::make_elements(
-        text(b.directory + "  ") | color(Theme::TextDim),
-        text(b.command)          | color(Theme::TextSub)
+        text(b.directory.empty() ? "" : b.directory + "  ") | color(Theme::TextDim),
+        text(b.command)                                      | color(Theme::TextSub)
     )) | size(HEIGHT, EQUAL, 1);
 
-    // ── Progress bar (only for running/pending)
+    // ── Progress bar (only for Running or Pending)
     Element progress_el = text("");
     if (b.status == BuildStatus::Running || b.status == BuildStatus::Pending) {
-        progress_el = vbox(Theme::make_elements(
-            Theme::ProgressBar(b.progress, strip_color)
-        ));
+        progress_el = Theme::ProgressBar(b.progress, strip_color);
     }
 
-    // ── Meta row: detail + duration
+    // ── Meta row: detail text + elapsed timer
     auto meta_row = hbox(Theme::make_elements(
-        text(b.detail)                            | color(Theme::TextDim),
+        text(b.detail)                               | color(Theme::TextDim),
         text(b.error_count > 0
             ? "  ⚡ " + std::to_string(b.error_count) + " err"
-            : "")                                 | color(Theme::Rose),
+            : "")                                    | color(Theme::Rose),
         filler(),
-        text(FormatDuration(b.elapsed_secs) + " ")| color(Theme::TextDim)
+        text(FormatDuration(b.elapsed_secs) + " ")  | color(Theme::TextDim)
     ));
 
     // ── Assemble card body
@@ -121,20 +124,18 @@ inline Element BuildCard(const BuildEntry& b, bool selected = false) {
         meta_row
     ));
 
-    // ── Left accent strip + body side by side
+    // ── Left accent strip "┃" + body
     auto card_inner = hbox(Theme::make_elements(
         Theme::AccentStrip(strip_color),
         text(" "),
         body | flex
     ));
 
-    // ── Card container with border
-    auto card = card_inner
-        
+    // ── Card wrapper: borderRounded, color changes on selection
+    return card_inner
+        | borderRounded
         | color(selected ? strip_color : Theme::BorderHi)
         | bgcolor(Theme::Surface);
-
-    return card;
 }
 
 // ─────────────────────────────────────────────────────
@@ -151,7 +152,7 @@ inline Element ActiveBuildsPanel(const std::vector<BuildEntry>& builds,
     for (int i = 0; i < (int)builds.size(); ++i) {
         cards.push_back(BuildCard(builds[i], i == selected_idx));
         if (i + 1 < (int)builds.size())
-            cards.push_back(text(""));  // small gap
+            cards.push_back(text(""));  // small gap between cards
     }
 
     if (builds.empty()) {
@@ -164,16 +165,17 @@ inline Element ActiveBuildsPanel(const std::vector<BuildEntry>& builds,
         ? text(std::to_string(running_count) + " running ") | color(Theme::SkyDim)
         : text("idle ") | color(Theme::TextDim);
 
-    // Manual header since we need right-aligned count
+    // Panel header with filler → right-side count
     auto header = hbox(Theme::make_elements(
-        text(" ⬡ ") | color(Theme::Sky),
+        text(" ⬡ ")         | color(Theme::Sky),
         text("Active Builds") | color(Theme::Sky) | bold,
         filler(),
         header_right
     ));
 
+    // window() + borderRounded on every panel (global rule #1)
     return window(header, vbox(cards) | flex)
-        
+        | borderRounded
         | color(Theme::BorderHi);
 }
 

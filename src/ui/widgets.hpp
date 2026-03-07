@@ -25,7 +25,7 @@ struct FlameEntry {
     bool        is_slow;     // highlight in gold
 };
 
-// Pick a pastel color cycling through the palette
+// Pick a pastel color cycling through the palette (index, not time-based)
 inline Theme::Color FlameColor(int idx, bool slow) {
     if (slow) return Theme::Gold;
     static const Theme::Color kColors[] = {
@@ -38,9 +38,11 @@ inline Theme::Color FlameColor(int idx, bool slow) {
 // ─────────────────────────────────────────────────────
 //  Flamechart Panel
 //
-//  hyper    ██████████████████████░  12.4s
-//  tokio    ██████████████░░░░░░░░░   9.8s
-//  sqlx  ⚡ ████████████░░░░░░░░░░░ SLOW 7.4s
+//  ≋ Compile Flamechart               cargo · 38.2s total
+//  ─────────────────────────────────────────────────
+//      hyper  ██████████████████████░  12.4s
+//      tokio  ██████████████░░░░░░░░░   9.8s
+//  ⚡  sqlx   ████████████░░░░░░░░░░░   7.4s !
 // ─────────────────────────────────────────────────────
 inline Element FlamechartPanel(const std::vector<FlameEntry>& entries,
                                 const std::string& tool_label = "cargo",
@@ -63,59 +65,59 @@ inline Element FlamechartPanel(const std::vector<FlameEntry>& entries,
         time_ss << std::fixed << std::setprecision(1) << e.duration_s << "s";
         std::string time_str = time_ss.str();
 
-        // Label column (right-aligned, fixed width)
+        // Label column: fixed 14 chars, right-aligned, "⚡ " prefix for slow
         auto label_el = hbox(Theme::make_elements(
             text(e.is_slow ? "⚡ " : "   ") | color(Theme::Gold),
             text(e.name) | color(e.is_slow ? Theme::Gold : Theme::TextSub)
         )) | size(WIDTH, EQUAL, 14);
 
-        // Bar — use gauge() inside a fixed-height box
-        auto bar = hbox(Theme::make_elements(
-            gauge(fill) | color(c) | flex
-        )) | size(HEIGHT, EQUAL, 1);
+        // Gauge bar — always 1 row tall (global rule #4)
+        auto bar = gauge(fill) | color(c) | flex | size(HEIGHT, EQUAL, 1);
 
-        // Time column
+        // Time column: fixed 8 chars, " !" suffix for slow
         auto time_el = hbox(Theme::make_elements(
             text("  "),
             text(time_str) | color(e.is_slow ? Theme::Gold : Theme::TextDim),
             text(e.is_slow ? " !" : "  ") | color(Theme::Gold)
         )) | size(WIDTH, EQUAL, 8);
 
-        rows.push_back(hbox(Theme::make_elements( label_el, text(" "), bar | flex, time_el )));
+        rows.push_back(hbox(Theme::make_elements(label_el, text(" "), bar, time_el)));
     }
 
     std::ostringstream total_ss;
     total_ss << std::fixed << std::setprecision(1) << computed_total;
 
     auto header = hbox(Theme::make_elements(
-        text(" ≋ ") | color(Theme::Mint),
+        text(" ≋ ")              | color(Theme::Mint),
         text("Compile Flamechart") | color(Theme::Mint) | bold,
         filler(),
         text(tool_label + " · " + total_ss.str() + "s total ") | color(Theme::TextDim)
     ));
 
     return window(header, vbox(rows) | flex)
-        
+        | borderRounded
         | color(Theme::BorderHi);
 }
 
 // ═════════════════════════════════════════════════════
 //  STAT TILES
-//  A row of small metric cards
+//  A row of small metric cards with borderRounded
 // ═════════════════════════════════════════════════════
 struct StatTile {
-    std::string label;    // "Builds Today"
-    std::string value;    // "14"
-    std::string sub;      // "↑ 3 from yesterday"
+    std::string  label;    // "Builds Today" displayed ALLCAPS
+    std::string  value;    // "14"
+    std::string  sub;      // "↑ 3 from yesterday"
     Theme::Color color = Theme::Sky;
 };
 
+// Individual stat card:
+//  vbox({ LABEL, VALUE, subtext }) | borderRounded | color | bgcolor | flex
 inline Element StatCard(const StatTile& s) {
     return vbox(Theme::make_elements(
-        text(" " + s.label) | color(Theme::TextDim),
-        text(" " + s.value) | color(s.color) | bold | size(HEIGHT, EQUAL, 1),
-        text(" " + s.sub)   | color(Theme::TextDim)
-    ))  | color(Theme::BorderHi) | bgcolor(Theme::Surface) | flex;
+        text(" " + s.label)   | color(Theme::TextDim),
+        text(" " + s.value)   | color(s.color) | bold | size(HEIGHT, EQUAL, 1),
+        text(" " + s.sub)     | color(Theme::TextDim)
+    )) | borderRounded | color(Theme::BorderHi) | bgcolor(Theme::Surface) | flex;
 }
 
 inline Element StatRow(const std::vector<StatTile>& tiles) {
@@ -129,7 +131,7 @@ inline Element StatRow(const std::vector<StatTile>& tiles) {
 
 // ═════════════════════════════════════════════════════
 //  LOG VIEW
-//  A scrollable-friendly vbox of log lines
+//  Shows last N lines (auto-scroll to bottom)
 // ═════════════════════════════════════════════════════
 enum class LogLevel { Info, Ok, Warning, Error, Dim };
 
@@ -171,8 +173,9 @@ inline Element LogPanel(const std::vector<LogLine>& lines,
         rows.push_back(text("  Waiting for output…") | color(Theme::TextDim));
     }
 
+    // Header: "⫶ Live Output" + scroll lock hint right-aligned
     auto header = hbox(Theme::make_elements(
-        text(" ⫶ ") | color(Theme::TextSub),
+        text(" ⫶ ")        | color(Theme::TextSub),
         text("Live Output") | color(Theme::TextSub) | bold,
         filler(),
         Theme::keyhint("S", "scroll lock"),
@@ -180,7 +183,7 @@ inline Element LogPanel(const std::vector<LogLine>& lines,
     ));
 
     return window(header, vbox(rows) | flex)
-        
+        | borderRounded
         | color(Theme::BorderHi);
 }
 

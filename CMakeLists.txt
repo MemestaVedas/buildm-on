@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 project(buildm-on)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
@@ -42,6 +43,6 @@ if(WIN32)
   set(CPACK_GENERATOR "NSIS")
   set(CPACK_PACKAGE_NAME "Buildm-on")
   set(CPACK_PACKAGE_VENDOR "Buildm-on Developers")
-  set(CPACK_PACKAGE_VERSION "1.5.0")
+  set(CPACK_PACKAGE_VERSION "2.0.0")
   include(CPack)
 endif()

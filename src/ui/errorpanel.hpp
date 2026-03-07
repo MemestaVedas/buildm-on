@@ -6,7 +6,7 @@
 
 // ╭──────────────────────────────────────────────────╮
 // │   Error Analysis Panel                           │
-// │   Smart error parser display + diff badges       │
+// │   Smart error display + diff badges              │
 // ╰──────────────────────────────────────────────────╯
 
 namespace UI {
@@ -28,7 +28,7 @@ struct ErrorEntry {
     std::string    code;          // "E0382"
     std::string    message;       // "borrow of moved value: `config`"
     std::string    snippet_line;  // the offending source line
-    std::string    pointer;       // "       ^^^^^^ value used after move"
+    std::string    pointer;       // "  ^^^^^^ value used after move"
     std::string    tool;          // "rustc", "tsc", etc.
 };
 
@@ -37,28 +37,29 @@ struct ErrorEntry {
 // ─────────────────────────────────────────────────────
 inline std::pair<std::string,Theme::Color> SeverityStyle(ErrorSeverity s) {
     switch (s) {
-        case ErrorSeverity::Error:   return { "✕ error",   Theme::Rose     };
-        case ErrorSeverity::Warning: return { "⚠ warning", Theme::Gold     };
-        case ErrorSeverity::Hint:    return { "→ hint",    Theme::Sky      };
-        case ErrorSeverity::Note:    return { "• note",    Theme::TextSub  };
+        case ErrorSeverity::Error:   return { "✕ error",   Theme::Rose    };
+        case ErrorSeverity::Warning: return { "⚠ warning", Theme::Gold    };
+        case ErrorSeverity::Hint:    return { "→ hint",    Theme::Sky     };
+        case ErrorSeverity::Note:    return { "• note",    Theme::TextSub };
     }
     return { "?", Theme::TextDim };
 }
 
 // ─────────────────────────────────────────────────────
-//  Diff state badge: NEW / RESOLVED / (nothing)
+//  Diff state badge: NEW / FIXED / (nothing)
+//  Format rule: text(" LABEL ") | color(c) | bold | borderRounded | color(c)
 // ─────────────────────────────────────────────────────
 inline Element DiffBadge(ErrorDiffState state) {
     switch (state) {
         case ErrorDiffState::New:
             return hbox(Elements{
                 text(" NEW ") | color(Theme::Gold) | bold,
-            })  | color(Theme::Gold);
+            }) | borderRounded | color(Theme::Gold);
 
         case ErrorDiffState::Resolved:
             return hbox(Theme::make_elements(
                 text(" FIXED ") | color(Theme::Sage) | bold
-            ))  | color(Theme::Sage);
+            )) | borderRounded | color(Theme::Sage);
 
         case ErrorDiffState::Persisting:
         default:
@@ -69,7 +70,7 @@ inline Element DiffBadge(ErrorDiffState state) {
 // ─────────────────────────────────────────────────────
 //  Single error entry element
 //
-//  ┃  ✕ error[E0382]  src/main.rs:48:12       NEW ✦
+//  ┃  ✕ error[E0382]  src/main.rs:48:12           NEW
 //     borrow of moved value: `config`
 //     48 │  let x = config.build();
 //              ^^^^^^ value used after move
@@ -77,14 +78,21 @@ inline Element DiffBadge(ErrorDiffState state) {
 inline Element ErrorCard(const ErrorEntry& e, bool compact = false) {
     auto [sev_label, sev_color] = SeverityStyle(e.severity);
 
-    // Location string: "src/main.rs:48:12"
-    std::string location = e.file + ":" + std::to_string(e.line) + ":" + std::to_string(e.col);
+    // Resolved errors rendered dim — use dim colors instead of real accent
+    auto text_col   = (e.diff_state == ErrorDiffState::Resolved) ? Theme::TextDim  : sev_color;
+    auto msg_col    = (e.diff_state == ErrorDiffState::Resolved) ? Theme::TextDim  : Theme::Text;
+    auto border_col = (e.diff_state == ErrorDiffState::Resolved) ? Theme::Border   : Theme::BorderHi;
 
-    // Top row
+    // Location string: "src/main.rs:48:12"
+    std::string location = e.file
+        + (e.line > 0 ? ":" + std::to_string(e.line) : "")
+        + (e.col  > 0 ? ":" + std::to_string(e.col)  : "");
+
+    // Top row: icon + severity[code]  location   diff badge
     auto top = hbox(Theme::make_elements(
-        text(" ▸ ")         | color(sev_color),
-        text(sev_label)     | color(sev_color) | bold,
-        text(e.code.empty() ? "" : "[" + e.code + "]") | color(sev_color),
+        text(" ▸ ")         | color(text_col),
+        text(sev_label)     | color(text_col) | bold,
+        text(e.code.empty() ? "" : "[" + e.code + "]") | color(text_col),
         text("  "),
         text(location)      | color(Theme::TextSub),
         filler(),
@@ -95,12 +103,12 @@ inline Element ErrorCard(const ErrorEntry& e, bool compact = false) {
     // Message row
     auto msg = hbox(Theme::make_elements(
         text("   "),
-        text(e.message) | color(Theme::Text)
+        text(e.message) | color(msg_col)
     ));
 
     Element card;
     if (!compact && !e.snippet_line.empty()) {
-        // Code snippet box
+        // Code snippet inset box with BG background
         auto snippet = vbox(Theme::make_elements(
             hbox(Theme::make_elements(
                 text("   "),
@@ -109,44 +117,43 @@ inline Element ErrorCard(const ErrorEntry& e, bool compact = false) {
             )),
             hbox(Theme::make_elements(
                 text("     "),
-                text(e.pointer) | color(sev_color)
+                text(e.pointer) | color(text_col)
             ))
         )) | bgcolor(Theme::BG) | borderEmpty;
 
-        card = vbox(Theme::make_elements( top, msg, snippet ));
+        card = vbox(Theme::make_elements(top, msg, snippet));
     } else {
-        card = vbox(Theme::make_elements( top, msg ));
+        card = vbox(Theme::make_elements(top, msg));
     }
 
-    // Left border strip in severity color
+    // Left accent strip in severity color
     return hbox(Theme::make_elements(
-        Theme::AccentStrip(sev_color),
+        Theme::AccentStrip(text_col),
         card | flex
-    )) | bgcolor(Theme::Surface)  | color(Theme::BorderHi);
+    )) | bgcolor(Theme::Surface) | color(border_col);
 }
 
 // ─────────────────────────────────────────────────────
 //  Error Analysis Panel
-//  Header shows: "3 active · 1 new · 2 resolved"
+//  Header: "✕ Error Analysis"  |  "+N new · -N fixed"
 // ─────────────────────────────────────────────────────
 inline Element ErrorPanel(const std::vector<ErrorEntry>& errors,
                            int                           max_visible = 4) {
     int total    = errors.size();
-    int new_cnt  = 0, fixed_cnt = 0, warn_cnt = 0;
+    int new_cnt  = 0, fixed_cnt = 0;
     for (const auto& e : errors) {
         if (e.diff_state == ErrorDiffState::New)      ++new_cnt;
         if (e.diff_state == ErrorDiffState::Resolved)  ++fixed_cnt;
-        if (e.severity   == ErrorSeverity::Warning)    ++warn_cnt;
     }
 
-    // Header summary
+    // Header with diff summary
     auto header = hbox(Theme::make_elements(
-        text(" ✕ ")            | color(Theme::Rose),
-        text("Error Analysis") | color(Theme::Rose) | bold,
+        text(" ✕ ")             | color(Theme::Rose),
+        text("Error Analysis")  | color(Theme::Rose) | bold,
         filler(),
-        text(std::to_string(total) + " active")   | color(Theme::TextDim),
+        text(std::to_string(total) + " active")       | color(Theme::TextDim),
         text("  ·  "),
-        text("+" + std::to_string(new_cnt) + " new")  | color(Theme::Gold) | bold,
+        text("+" + std::to_string(new_cnt)   + " new") | color(Theme::Gold) | bold,
         text("  ·  "),
         text("-" + std::to_string(fixed_cnt) + " fixed") | color(Theme::Sage),
         text(" ")
@@ -154,15 +161,17 @@ inline Element ErrorPanel(const std::vector<ErrorEntry>& errors,
 
     Elements cards;
     int shown = 0;
+
+    // Active errors first
     for (const auto& e : errors) {
-        if (e.diff_state == ErrorDiffState::Resolved) continue; // resolved shown compact at bottom
+        if (e.diff_state == ErrorDiffState::Resolved) continue;
         if (shown >= max_visible) break;
         cards.push_back(ErrorCard(e, shown >= 2));  // compact after 2nd
         cards.push_back(text(""));
         ++shown;
     }
 
-    // Show resolved compactly if any
+    // Resolved errors compactly at bottom (dimmed by ErrorCard internally)
     for (const auto& e : errors) {
         if (e.diff_state == ErrorDiffState::Resolved) {
             cards.push_back(ErrorCard(e, true));
@@ -175,7 +184,7 @@ inline Element ErrorPanel(const std::vector<ErrorEntry>& errors,
     }
 
     return window(header, vbox(cards) | flex)
-        
+        | borderRounded
         | color(Theme::BorderHi);
 }
 
