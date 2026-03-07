@@ -85,7 +85,7 @@ inline Element BuildCard(const BuildEntry& b, bool selected = false) {
         filler(),
         hbox(Theme::make_elements(
             text(" " + status_label + " ") | color(accent) | bold
-        )) | borderRounded | color(accent),
+        ))  | color(accent),
         text(" ")
     ));
 
@@ -130,7 +130,7 @@ inline Element BuildCard(const BuildEntry& b, bool selected = false) {
 
     // ── Card container with border
     auto card = card_inner
-        | borderRounded
+        
         | color(selected ? strip_color : Theme::BorderHi)
         | bgcolor(Theme::Surface);
 
@@ -173,7 +173,7 @@ inline Element ActiveBuildsPanel(const std::vector<BuildEntry>& builds,
     ));
 
     return window(header, vbox(cards) | flex)
-        | borderRounded
+        
         | color(Theme::BorderHi);
 }
 

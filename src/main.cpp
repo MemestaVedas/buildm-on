@@ -654,6 +654,18 @@ int main(int argc, char** argv) {
 
     // ── Global Event Handler ──────────────────────
     auto event_handler = CatchEvent(renderer, [&](Event e) {
+        // Handle field navigation swap as requested
+        if (state.active_tab == 1) {
+            if (e == Event::TabReverse) { // Shift+Tab -> Next
+                renderer->OnEvent(Event::Tab);
+                return true;
+            }
+            if (e == Event::Tab) { // Tab -> Previous
+                renderer->OnEvent(Event::TabReverse);
+                return true;
+            }
+        }
+
         if (e == Event::Character('q')) { is_running = false; screen.ExitLoopClosure()(); return true; }
         if (e == Event::Character('1')) { state.active_tab = 0; return true; }
         if (e == Event::Character('2')) { state.active_tab = 1; return true; }

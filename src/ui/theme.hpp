@@ -24,6 +24,7 @@ inline const Color BG       = Color::RGB(15,  15,  20);   // #0f0f14  deepest bg
 inline const Color BG2      = Color::RGB(21,  21,  30);   // #15151e  panel bg
 inline const Color Surface  = Color::RGB(30,  30,  46);   // #1e1e2e  card surface
 inline const Color Overlay  = Color::RGB(38,  38,  58);   // #26263a  header/overlay
+inline const Color FocusedBG = Color::RGB(45, 45, 70);  // #2d2d46  input highlight
 inline const Color Border   = Color::RGB(42,  42,  62);   // #2a2a3e  subtle border
 inline const Color BorderHi = Color::RGB(58,  58,  84);   // #3a3a54  active border
 
@@ -101,7 +102,7 @@ inline Element RoundedPanel(const std::string& icon,
         text(title)            | color(accent_color) | bold,
         text(" "),
     });
-    return window(header, body | flex) | borderRounded | color(BorderHi);
+    return window(header, body | flex) | color(BorderHi);
 }
 
 // ─────────────────────────────────────────────────────

@@ -53,12 +53,12 @@ inline Element DiffBadge(ErrorDiffState state) {
         case ErrorDiffState::New:
             return hbox(Elements{
                 text(" NEW ") | color(Theme::Gold) | bold,
-            }) | borderRounded | color(Theme::Gold);
+            })  | color(Theme::Gold);
 
         case ErrorDiffState::Resolved:
             return hbox(Theme::make_elements(
                 text(" FIXED ") | color(Theme::Sage) | bold
-            )) | borderRounded | color(Theme::Sage);
+            ))  | color(Theme::Sage);
 
         case ErrorDiffState::Persisting:
         default:
@@ -122,7 +122,7 @@ inline Element ErrorCard(const ErrorEntry& e, bool compact = false) {
     return hbox(Theme::make_elements(
         Theme::AccentStrip(sev_color),
         card | flex
-    )) | bgcolor(Theme::Surface) | borderRounded | color(Theme::BorderHi);
+    )) | bgcolor(Theme::Surface)  | color(Theme::BorderHi);
 }
 
 // ─────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ inline Element ErrorPanel(const std::vector<ErrorEntry>& errors,
     }
 
     return window(header, vbox(cards) | flex)
-        | borderRounded
+        
         | color(Theme::BorderHi);
 }
 

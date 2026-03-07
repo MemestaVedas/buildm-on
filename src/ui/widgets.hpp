@@ -95,7 +95,7 @@ inline Element FlamechartPanel(const std::vector<FlameEntry>& entries,
     ));
 
     return window(header, vbox(rows) | flex)
-        | borderRounded
+        
         | color(Theme::BorderHi);
 }
 
@@ -115,7 +115,7 @@ inline Element StatCard(const StatTile& s) {
         text(" " + s.label) | color(Theme::TextDim),
         text(" " + s.value) | color(s.color) | bold | size(HEIGHT, EQUAL, 1),
         text(" " + s.sub)   | color(Theme::TextDim)
-    )) | borderRounded | color(Theme::BorderHi) | bgcolor(Theme::Surface) | flex;
+    ))  | color(Theme::BorderHi) | bgcolor(Theme::Surface) | flex;
 }
 
 inline Element StatRow(const std::vector<StatTile>& tiles) {
@@ -180,7 +180,7 @@ inline Element LogPanel(const std::vector<LogLine>& lines,
     ));
 
     return window(header, vbox(rows) | flex)
-        | borderRounded
+        
         | color(Theme::BorderHi);
 }
 

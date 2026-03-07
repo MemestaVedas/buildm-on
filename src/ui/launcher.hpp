@@ -35,7 +35,7 @@ inline Element QuickLaunchChip(const std::string& cmd, bool focused) {
     auto c = focused ? Theme::Lavender : Theme::TextDim;
     return hbox(Elements{
         text(" " + cmd + " ") | color(c),
-    }) | borderRounded | color(c);
+    })  | color(c);
 }
 
 // ─────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ inline Element LastRunTile(const LastRunInfo& r) {
     if (!r.has_result) {
         return hbox(Elements{
             text("  No recent run") | color(Theme::TextDim),
-        }) | borderRounded | color(Theme::BorderHi) | bgcolor(Theme::Surface);
+        })  | color(Theme::BorderHi) | bgcolor(Theme::Surface);
     }
 
     auto status_col = vbox(Elements{
@@ -80,7 +80,7 @@ inline Element LastRunTile(const LastRunInfo& r) {
         filler(),
         errors_col,
         text(" "),
-    }) | borderRounded | color(Theme::BorderHi) | bgcolor(Theme::Surface);
+    })  | color(Theme::BorderHi) | bgcolor(Theme::Surface);
 }
 
 // ─────────────────────────────────────────────────────
@@ -113,9 +113,9 @@ inline Element InputField(const std::string& prompt_icon,
             | color(focused ? Theme::Text : Theme::TextSub),
         cursor,
         text(" "),
-    }) | borderRounded
+    }) 
        | color(focused ? accent : Theme::BorderHi)
-       | bgcolor(Theme::BG);
+       | bgcolor(focused ? Theme::FocusedBG : Theme::BG);
 }
 
 inline Element LauncherForm(const LauncherState& ls) {
@@ -153,11 +153,11 @@ inline Element LauncherForm(const LauncherState& ls) {
     auto run_btn = hbox(Elements{
         text(ls.running ? "  ■ Kill Build  " : "  ⏎ Run Build  ")
             | color(ls.running ? Theme::Rose : Theme::Sky) | bold,
-    }) | borderRounded | color(ls.running ? Theme::Rose : Theme::Sky) | flex;
+    })  | color(ls.running ? Theme::Rose : Theme::Sky) | flex;
 
     auto clear_btn = hbox(Elements{
         text("  ✕ Clear  ") | color(Theme::TextDim),
-    }) | borderRounded | color(Theme::BorderHi);
+    })  | color(Theme::BorderHi);
 
     auto btn_row = hbox(Elements{ run_btn, text(" "), clear_btn });
 
@@ -177,7 +177,6 @@ inline Element LauncherForm(const LauncherState& ls) {
     ));
 
     return window(header, form_body | flex)
-        | borderRounded
         | color(Theme::BorderHi);
 }
 
@@ -186,7 +185,7 @@ inline Element LauncherForm(const LauncherState& ls) {
 // ─────────────────────────────────────────────────────
 inline Element LauncherView(const LauncherState& ls, int active_tab) {
     static const std::vector<std::pair<std::string,std::string>> kHints = {
-        {"Tab", "next field"}, {"Enter", "run"}, {"Ctrl+C", "kill"}, {"Esc", "back"},
+        {"Shift+Tab", "next field"}, {"Enter", "run"}, {"Ctrl+C", "kill"}, {"Esc", "back"},
     };
 
     auto left  = LauncherForm(ls) | size(WIDTH, EQUAL, 44);
