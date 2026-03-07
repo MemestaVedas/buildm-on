@@ -195,11 +195,56 @@ public:
                 }
             }
 
+            // ── Webpack ────────────────────────────────────────────
+            // Format: ERROR in ./src/app.tsx 42:7-15
+            if (!found) {
+                static const std::regex webpack_re(
+                    R"(^(ERROR|WARNING) in (.+) (\d+):(\d+).*$)"
+                );
+                std::smatch m;
+                if (std::regex_match(line, m, webpack_re)) {
+                    err.severity = sev_from_str(m[1]);
+                    err.file    = m[2];
+                    err.line    = std::stoi(m[3]);
+                    err.column  = std::stoi(m[4]);
+                    err.tool    = "webpack";
+                    // Attempt to grab message from next lines
+                    if (i + 1 < lines.size()) {
+                        err.message = lines[i+1];
+                    }
+                    found = true;
+                }
+            }
+
+            // ── Node Stack Traces ──────────────────────────────────
+            // Format:     at Object.<anonymous> (/path/to/file.js:42:7)
+            if (!found) {
+                static const std::regex node_stack_re(
+                    R"(^\s+at\s+(?:[^\(]+\()?([^:]+):(\d+):(\d+)\)?$)"
+                );
+                std::smatch m;
+                if (std::regex_match(line, m, node_stack_re)) {
+                    err.file    = m[1];
+                    err.line    = std::stoi(m[2]);
+                    err.column  = std::stoi(m[3]);
+                    err.severity = ErrorSeverity::Error;
+                    err.tool    = "node";
+                    for (int k = (int)i - 1; k >= 0 && i - k < 5; k--) {
+                        if (!lines[k].empty() && lines[k][0] != ' ') {
+                            err.message = lines[k];
+                            break;
+                        }
+                    }
+                    if (err.message.empty()) err.message = "Exception thrown";
+                    found = true;
+                }
+            }
+
             // ── Bazel ──────────────────────────────────────────────
             // Format: ERROR: path/to/BUILD:42:7: no such package 'foo'
             if (!found) {
                 static const std::regex bazel_re(
-                    R"(^(ERROR|WARNING): (.+):(\d+):(\d+): (.+)$)"
+                    R"(^(ERROR|WARNING|FAIL): (.+):(\d+):(\d+): (.+)$)"
                 );
                 std::smatch m;
                 if (std::regex_match(line, m, bazel_re)) {

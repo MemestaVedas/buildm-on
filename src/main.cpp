@@ -783,22 +783,107 @@ int main(int argc, char** argv) {
         }) | flex | border;
     });
 
+    // ═══════════════════════════════════════
+    // TAB 7: Visualize
+    // ═══════════════════════════════════════
+    auto visualize_view = Renderer(empty_comp, [&] {
+        std::lock_guard<std::mutex> lk(state.mtx);
+        Elements el;
+        
+        el.push_back(text("  Build Timeline (Last 5)") | bold | color(Color::Cyan));
+        el.push_back(separator());
+        
+        auto hist = load_history();
+        if (hist.empty()) {
+            el.push_back(text("  No history available for visualization.") | dim);
+        } else {
+            std::sort(hist.begin(), hist.end(), [](auto& a, auto& b) { return a.timestamp > b.timestamp; });
+            int count = std::min(5, (int)hist.size());
+            
+            time_t max_time = hist[0].timestamp;
+            time_t min_time = hist[0].timestamp - hist[0].duration_seconds;
+            for (int i = 1; i < count; i++) {
+                if (hist[i].timestamp > max_time) max_time = hist[i].timestamp;
+                time_t st = hist[i].timestamp - hist[i].duration_seconds;
+                if (st < min_time) min_time = st;
+            }
+            
+            float total_span = std::max(1.0f, (float)(max_time - min_time));
+            
+            for (int i = 0; i < count; i++) {
+                auto& h = hist[i];
+                time_t st = h.timestamp - h.duration_seconds;
+                float start_pct = (st - min_time) / total_span;
+                float dur_pct = h.duration_seconds / total_span;
+                if (dur_pct < 0.02f) dur_pct = 0.02f;
+                
+                int total_chars = 60;
+                int start_spaces = (int)(start_pct * total_chars);
+                int dur_chars = (int)(dur_pct * total_chars);
+                
+                std::string bar = std::string(start_spaces, ' ') + std::string(dur_chars, '#') + " " + format_duration(h.duration_seconds);
+                Color c = (h.status == "Success") ? Color::Green : Color::Red;
+                el.push_back(hbox({
+                    text("  " + h.project) | size(WIDTH, EQUAL, 20),
+                    text(bar) | color(c)
+                }));
+            }
+            el.push_back(text(""));
+            
+            el.push_back(text("  Side-by-Side Comparison (Latest vs Previous)") | bold | color(Color::Cyan));
+            el.push_back(separator());
+            
+            if (count >= 2) {
+                auto& b1 = hist[0];
+                auto& b2 = hist[1];
+                
+                auto col1 = vbox({
+                    text(" " + format_timestamp(b1.timestamp)) | bold,
+                    text(" Project: " + b1.project),
+                    text(" Tool: " + b1.tool),
+                    text(" Status: " + b1.status) | color(b1.status == "Success" ? Color::Green : Color::Red),
+                    text(" Duration: " + format_duration(b1.duration_seconds)),
+                    text(" Errors: " + std::to_string(b1.errors.size()))
+                }) | border;
+                
+                auto col2 = vbox({
+                    text(" " + format_timestamp(b2.timestamp)) | bold,
+                    text(" Project: " + b2.project),
+                    text(" Tool: " + b2.tool),
+                    text(" Status: " + b2.status) | color(b2.status == "Success" ? Color::Green : Color::Red),
+                    text(" Duration: " + format_duration(b2.duration_seconds)),
+                    text(" Errors: " + std::to_string(b2.errors.size()))
+                }) | border;
+                
+                el.push_back(hbox({ col1 | flex, col2 | flex }));
+            } else {
+                el.push_back(text("  Need at least 2 builds for comparison.") | dim);
+            }
+        }
+        
+        return vbox({
+            hbox({text(" VISUALIZE") | bold | color(Color::Magenta), filler()}),
+            separator(),
+            vbox(std::move(el)) | flex
+        }) | flex | border;
+    });
+
     // ── Tab menu ──────────────────────────────────
     auto make_tab_entries = [&]() -> std::vector<std::string> {
         int ec = 0;
         { std::lock_guard<std::mutex> lk(state.mtx); ec = (int)state.all_errors.size(); }
         std::string err_label = " ERRORS";
         if (ec > 0) err_label += " [" + std::to_string(ec) + "]";
-        return {" DASHBOARD ", " RUN ", " LOG ", " HISTORY ", err_label + " ", " PLUGINS "};
+        return {" DASHBOARD ", " RUN ", " LOG ", " HISTORY ", err_label + " ", " PLUGINS ", " VISUALIZE "};
     };
     std::vector<std::string> tab_entries = make_tab_entries();
     auto tab_menu = Menu(&tab_entries, &selected_tab);
     auto tab_container = Container::Tab({
-        dashboard_view, run_view, log_view, history_view, errors_view, plugins_view
+        dashboard_view, run_view, log_view, history_view, errors_view, plugins_view, visualize_view
     }, &selected_tab);
     auto main_container = Container::Vertical({tab_menu, tab_container});
 
-    // ── Main renderer (with overlay) ───────────────
+        // ── Main renderer (with overlay) ───────────────
     auto renderer = Renderer(main_container, [&] {
         tab_entries = make_tab_entries();
 
@@ -833,7 +918,7 @@ int main(int argc, char** argv) {
             top_bar | border,
             tab_menu->Render() | hcenter | color(Color::Cyan),
             tab_container->Render() | flex,
-            text("  q:Quit  1-6:Tabs  S:Scroll  C:Copy-errors  Enter:Confirm  Esc:Dismiss") | dim
+            text("  q:Quit  1-7:Tabs  S:Scroll  C:Copy-errors  Enter:Confirm  Esc:Dismiss") | dim
         });
 
         // Failure overlay
@@ -887,6 +972,7 @@ int main(int argc, char** argv) {
         if (e == Event::Character('4'))   { selected_tab = 3; return true; }
         if (e == Event::Character('5'))   { selected_tab = 4; return true; }
         if (e == Event::Character('6'))   { selected_tab = 5; return true; }
+        if (e == Event::Character('7'))   { selected_tab = 6; return true; }
 
         if (e == Event::Escape) {
             state.show_failure_overlay = false;
