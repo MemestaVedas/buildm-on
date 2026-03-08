@@ -20,32 +20,32 @@ inline Elements make_elements(Args... args) {
 }
 
 // ── Backgrounds ──────────────────────────────────────
-inline const Color BG        = Color::RGB(15,  15,  20);   // #0f0f14  deepest bg
-inline const Color BG2       = Color::RGB(21,  21,  30);   // #15151e  panel bg
-inline const Color Surface   = Color::RGB(30,  30,  46);   // #1e1e2e  card surface
-inline const Color Overlay   = Color::RGB(38,  38,  58);   // #26263a  header/overlay
-inline const Color FocusedBG = Color::RGB(45,  45,  70);   // #2d2d46  input highlight
-inline const Color Border    = Color::RGB(42,  42,  62);   // #2a2a3e  subtle border
-inline const Color BorderHi  = Color::RGB(58,  58,  84);   // #3a3a54  active border
+inline const Color BG        = ftxui::Color(15,  15,  20);   // #0f0f14  deepest bg
+inline const Color BG2       = ftxui::Color(21,  21,  30);   // #15151e  panel bg
+inline const Color Surface   = ftxui::Color(30,  30,  46);   // #1e1e2e  card surface
+inline const Color Overlay   = ftxui::Color(38,  38,  58);   // #26263a  header/overlay
+inline const Color FocusedBG = ftxui::Color(45,  45,  70);   // #2d2d46  input highlight
+inline const Color Border    = ftxui::Color(42,  42,  62);   // #2a2a3e  subtle border
+inline const Color BorderHi  = ftxui::Color(58,  58,  84);   // #3a3a54  active border
 
 // ── Text ─────────────────────────────────────────────
-inline const Color Text      = Color::RGB(224, 223, 240);  // #e0dff0  primary text
-inline const Color TextSub   = Color::RGB(136, 136, 152);  // #888898  secondary text
-inline const Color TextDim   = Color::RGB(85,  85,  104);  // #555568  muted/metadata
+inline const Color Text      = ftxui::Color(224, 223, 240);  // #e0dff0  primary text
+inline const Color TextSub   = ftxui::Color(136, 136, 152);  // #888898  secondary text
+inline const Color TextDim   = ftxui::Color(85,  85,  104);  // #555568  muted/metadata
 
 // ── Pastel Accents ────────────────────────────────────
-inline const Color Rose      = Color::RGB(244, 167, 185);  // errors / failure
-inline const Color RoseDim   = Color::RGB(196, 123, 142);
-inline const Color Peach     = Color::RGB(248, 180, 160);  // launcher / inputs
-inline const Color Gold      = Color::RGB(245, 214, 160);  // warnings / slow builds
-inline const Color Sage      = Color::RGB(168, 216, 176);  // success / passing
-inline const Color SageDim   = Color::RGB(110, 168, 120);
-inline const Color Sky       = Color::RGB(160, 200, 240);  // active / running
-inline const Color SkyDim    = Color::RGB(106, 158, 200);
-inline const Color Lavender  = Color::RGB(196, 176, 240);  // interactive / keybinds
-inline const Color LavDim    = Color::RGB(138, 120, 192);
-inline const Color Mint      = Color::RGB(160, 232, 216);  // flamechart / perf
-inline const Color MintDim   = Color::RGB(96,  184, 160);
+inline const Color Rose      = ftxui::Color(244, 167, 185);  // errors / failure
+inline const Color RoseDim   = ftxui::Color(196, 123, 142);
+inline const Color Peach     = ftxui::Color(248, 180, 160);  // launcher / inputs
+inline const Color Gold      = ftxui::Color(245, 214, 160);  // warnings / slow builds
+inline const Color Sage      = ftxui::Color(168, 216, 176);  // success / passing
+inline const Color SageDim   = ftxui::Color(110, 168, 120);
+inline const Color Sky       = ftxui::Color(160, 200, 240);  // active / running
+inline const Color SkyDim    = ftxui::Color(106, 158, 200);
+inline const Color Lavender  = ftxui::Color(196, 176, 240);  // interactive / keybinds
+inline const Color LavDim    = ftxui::Color(138, 120, 192);
+inline const Color Mint      = ftxui::Color(160, 232, 216);  // flamechart / perf
+inline const Color MintDim   = ftxui::Color(96,  184, 160);
 
 // ── Semantic aliases (use these in business logic) ───
 inline const Color ColorRunning = Sky;
